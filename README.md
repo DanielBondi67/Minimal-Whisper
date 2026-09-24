@@ -4,7 +4,7 @@ Minimal Whisper is a user-level XFCE/X11 app for offline voice typing with OpenA
 
 The repository contains the tray/settings UI, the X11 push-to-talk listener, and the user-level systemd and desktop-entry templates. The Whisper Python environment and model weights, runtime state, and personal settings are intentionally kept outside Git.
 
-The settings app auto-saves its model, language, shortcut, and theme. The compact recording overlay can be dragged; its position persists and can be reset to bottom-center from Settings.
+The settings app auto-saves its model, language, shortcut, theme, and UI scale. Scale it from 75% to 150%; the settings window and recording indicator resize together. The compact recording overlay can be dragged; its position persists and can be reset to bottom-center from Settings.
 
 Available transcription models include Small (multilingual, 244M parameters), Base (multilingual), and Base English. Small must be downloaded once before first use; model files are stored in `~/.cache/whisper`. To add an option, edit `config/models.json` or copy it to `~/.config/minimal-whisper/models.json` and add an entry with a display `label` and Whisper model identifier in `model`, such as `medium` or `large-v3`. The user config takes precedence over the bundled list, and Whisper downloads a model the first time it is used if it is not already cached.
 

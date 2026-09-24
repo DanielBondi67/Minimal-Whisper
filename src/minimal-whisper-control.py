@@ -13,7 +13,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QKeySequenceEdit, QMainWindow, QMenu, QPushButton, QSystemTrayIcon,
-    QVBoxLayout, QWidget,
+    QSlider, QVBoxLayout, QWidget,
 )
 
 HOME = Path.home()
@@ -29,7 +29,8 @@ LEGACY_MODEL_CONFIG = HOME / '.config/openai-whisper/models.json'
 BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
 SERVICE = 'minimal-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
-            'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None}
+            'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None,
+            'scale_percent': 100}
 
 THEMES = {
     'dark': {
@@ -145,11 +146,12 @@ def make_icon(theme='dark'):
 
 
 class Waveform(QWidget):
-    def __init__(self, color, parent=None):
+    def __init__(self, color, scale=1.0, parent=None):
         super().__init__(parent)
         self.color = color
+        self.scale = scale
         self.phase = 0.0
-        self.setMinimumSize(76, 24)
+        self.setMinimumSize(round(76 * scale), round(24 * scale))
 
     def advance(self):
         self.phase += 0.24
@@ -158,7 +160,7 @@ class Waveform(QWidget):
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(self.color, 2.2, Qt.PenStyle.SolidLine,
+        p.setPen(QPen(self.color, 2.2 * self.scale, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
         mid = self.height() / 2
         count = 17
@@ -173,27 +175,30 @@ class Waveform(QWidget):
 
 
 class Overlay(QWidget):
-    def __init__(self, theme, position=None, position_changed=None):
+    def __init__(self, theme, position=None, position_changed=None, scale_percent=100):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.WindowStaysOnTopHint |
                          Qt.WindowType.WindowDoesNotAcceptFocus)
         self.theme = theme
         self.saved_position = position
         self.position_changed = position_changed
+        self.scale = max(0.5, min(2.0, int(scale_percent) / 100))
         self.position_initialized = False
         self.drag_offset = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedSize(236, 54)
+        self.setFixedSize(round(236 * self.scale), round(54 * self.scale))
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(13, 7, 13, 7)
-        self.layout.setSpacing(8)
+        self.layout.setContentsMargins(*(round(n * self.scale) for n in (13, 7, 13, 7)))
+        self.layout.setSpacing(round(8 * self.scale))
         self.dot = QLabel('●')
         self.label = QLabel('LISTENING')
         for child in (self.dot, self.label):
             child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.label.setStyleSheet('font-size: 10px; font-weight: 700; letter-spacing: 1px;')
-        self.wave = Waveform(QColor(THEMES[theme]['accent']))
+        self.label.setStyleSheet(
+            f'font-size: {round(10 * self.scale)}px; font-weight: 700; '
+            f'letter-spacing: {round(self.scale)}px;')
+        self.wave = Waveform(QColor(THEMES[theme]['accent']), self.scale)
         self.wave.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.layout.addWidget(self.dot)
         self.layout.addWidget(self.label)
@@ -209,18 +214,38 @@ class Overlay(QWidget):
         foreground = colors['text']
         self.background_color = QColor(colors['panel'])
         self.setStyleSheet(f'QWidget {{ background: transparent; color: {foreground}; }}')
-        self.dot.setStyleSheet(f'color: {foreground}; font-size: 10px;')
+        self.dot.setStyleSheet(
+            f'color: {foreground}; font-size: {round(10 * self.scale)}px;')
         self.label.setStyleSheet(
-            f'color: {foreground}; font-size: 9px; font-weight: 700; letter-spacing: 1px;')
+            f'color: {foreground}; font-size: {round(9 * self.scale)}px; '
+            f'font-weight: 700; letter-spacing: {round(self.scale)}px;')
         self.wave.color = QColor(colors['accent'])
         self.update()
+
+    def apply_scale(self, scale_percent):
+        position = self.pos() if self.position_initialized else self.saved_position
+        self.scale = max(0.5, min(2.0, int(scale_percent) / 100))
+        self.setFixedSize(round(236 * self.scale), round(54 * self.scale))
+        self.layout.setContentsMargins(*(round(n * self.scale) for n in (13, 7, 13, 7)))
+        self.layout.setSpacing(round(8 * self.scale))
+        self.wave.scale = self.scale
+        self.wave.setMinimumSize(round(76 * self.scale), round(24 * self.scale))
+        self.apply_theme(self.theme)
+        if self.position_initialized:
+            clamped = self.clamp_position(position)
+            self.move(clamped)
+            if clamped != position:
+                self.saved_position = {'x': clamped.x(), 'y': clamped.y()}
+                if self.position_changed:
+                    self.position_changed(self.saved_position)
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self.background_color)
-        painter.drawRoundedRect(QRectF(self.rect()), 14, 14)
+        radius = 14 * self.scale
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
         painter.end()
 
     def show_bottom_center(self):
@@ -247,7 +272,7 @@ class Overlay(QWidget):
             return QPoint(0, 0)
         area = screen.availableGeometry()
         return QPoint(area.x() + (area.width() - self.width()) // 2,
-                      area.y() + area.height() - self.height() - 26)
+                      area.y() + area.height() - self.height() - round(26 * self.scale))
 
     def clamp_position(self, position):
         screens = QApplication.screens()
@@ -309,8 +334,8 @@ class MainWindow(QMainWindow):
         self.settings = read_json(SETTINGS, DEFAULTS)
         self.setWindowTitle('Minimal Whisper Settings')
         self.setWindowIcon(make_icon(self.settings['theme']))
-        self.setFixedWidth(430)
         self.build_ui()
+        self.apply_scale()
         self.apply_theme()
 
     def build_ui(self):
@@ -319,8 +344,7 @@ class MainWindow(QMainWindow):
         self._save_timer.timeout.connect(self.save_settings)
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(26, 24, 26, 22)
-        layout.setSpacing(18)
+        self.root_layout = layout
 
         heading = QHBoxLayout()
         titlebox = QVBoxLayout()
@@ -340,8 +364,7 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName('card')
         form = QFormLayout(card)
-        form.setContentsMargins(16, 14, 16, 14)
-        form.setVerticalSpacing(13)
+        self.form_layout = form
         self.model = QComboBox()
         self.models = read_models()
         for label, model_id in self.models:
@@ -366,6 +389,21 @@ class MainWindow(QMainWindow):
         form.addRow('Language', self.language)
         form.addRow('Shortcut', self.shortcut)
         form.addRow('Theme', self.theme_toggle)
+        scale_row = QWidget()
+        scale_layout = QHBoxLayout(scale_row)
+        self.scale_layout = scale_layout
+        scale_layout.setContentsMargins(0, 0, 0, 0)
+        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scale_slider.setRange(75, 150)
+        self.scale_slider.setSingleStep(5)
+        self.scale_slider.setPageStep(10)
+        self.scale_slider.setValue(max(75, min(150,
+                                     int(self.settings.get('scale_percent', 100)))))
+        self.scale_label = QLabel(f'{self.scale_slider.value()}%')
+        self.scale_label.setMinimumWidth(42)
+        scale_layout.addWidget(self.scale_slider, 1)
+        scale_layout.addWidget(self.scale_label)
+        form.addRow('UI scale', scale_row)
         self.reset_overlay = QPushButton('Reset to bottom-center')
         self.reset_overlay.setObjectName('secondary')
         form.addRow('Indicator position', self.reset_overlay)
@@ -393,6 +431,7 @@ class MainWindow(QMainWindow):
         self.shortcut.keySequenceChanged.connect(lambda _sequence: self.update_hotkey_hint())
         self.model.currentIndexChanged.connect(lambda _index: self.schedule_save())
         self.language.currentIndexChanged.connect(lambda _index: self.schedule_save())
+        self.scale_slider.valueChanged.connect(self.scale_changed)
         self.shortcut.keySequenceChanged.connect(self.shortcut_changed)
         self.theme_toggle.clicked.connect(self.toggle_theme)
         self.reset_overlay.clicked.connect(self.app.reset_overlay_position)
@@ -413,6 +452,29 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         self.app.refresh_theme()
         self.schedule_save(150)
+
+    def scale_changed(self, percent):
+        self.scale_label.setText(f'{percent}%')
+        self.settings['scale_percent'] = percent
+        self.app.settings['scale_percent'] = percent
+        self.apply_scale()
+        if hasattr(self.app, 'overlay'):
+            self.app.overlay.apply_scale(percent)
+        self.schedule_save()
+
+    def apply_scale(self):
+        self.scale_factor = self.scale_slider.value() / 100
+        self.setFixedWidth(round(430 * self.scale_factor))
+        self.root_layout.setContentsMargins(*(
+            round(n * self.scale_factor) for n in (26, 24, 26, 22)))
+        self.root_layout.setSpacing(round(18 * self.scale_factor))
+        self.form_layout.setContentsMargins(*(
+            round(n * self.scale_factor) for n in (16, 14, 16, 14)))
+        self.form_layout.setVerticalSpacing(round(13 * self.scale_factor))
+        self.scale_layout.setSpacing(round(8 * self.scale_factor))
+        self.scale_label.setMinimumWidth(round(42 * self.scale_factor))
+        self.scale_label.setText(f'{self.scale_slider.value()}%')
+        self.apply_theme()
 
     def schedule_save(self, delay=350):
         self.message.setText('Saving…')
@@ -442,28 +504,30 @@ class MainWindow(QMainWindow):
             'model': selected_model,
             'language': selected_language,
             'theme': 'dark' if self.theme_toggle.isChecked() else 'light',
+            'scale_percent': self.scale_slider.value(),
             'shortcut': shortcut,
             'overlay_position': self.app.settings.get('overlay_position'),
         }
 
     def apply_theme(self):
         c = THEMES[self.settings['theme']]
+        px = lambda value: max(1, round(value * self.scale_factor))
         self.update_theme_button()
         self.update_hotkey_hint()
         self.setStyleSheet(f"""
-            QMainWindow, QWidget {{ background: {c['window']}; color: {c['text']}; font-size: 13px; }}
-            QLabel#title {{ font-size: 24px; font-weight: 700; }}
+            QMainWindow, QWidget {{ background: {c['window']}; color: {c['text']}; font-size: {px(13)}px; }}
+            QLabel#title {{ font-size: {px(24)}px; font-weight: 700; }}
             QLabel#muted {{ color: {c['muted']}; }}
-            QLabel#badge {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: 12px; padding: 7px 10px; color: {c['text']}; font-size: 11px; }}
-            QFrame#card {{ background: {c['panel']}; border: 1px solid {c['line']}; border-radius: 14px; }}
-            QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: 8px; padding: 8px 10px; min-width: 190px; }}
+            QLabel#badge {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(12)}px; padding: {px(7)}px {px(10)}px; color: {c['text']}; font-size: {px(11)}px; }}
+            QFrame#card {{ background: {c['panel']}; border: 1px solid {c['line']}; border-radius: {px(14)}px; }}
+            QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(190)}px; }}
             QComboBox QAbstractItemView {{ background: {c['panel']}; selection-background-color: {c['accent']}; selection-color: {c['accent_text']}; }}
-            QKeySequenceEdit {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: 8px; padding: 7px 9px; min-width: 190px; }}
-            QLabel#hotkey {{ color: {c['muted']}; padding: 4px 2px; }}
-            QPushButton {{ border: 1px solid {c['line']}; border-radius: 9px; padding: 10px 14px; font-weight: 600; }}
+            QKeySequenceEdit {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(7)}px {px(9)}px; min-width: {px(190)}px; }}
+            QLabel#hotkey {{ color: {c['muted']}; padding: {px(4)}px {px(2)}px; }}
+            QPushButton {{ border: 1px solid {c['line']}; border-radius: {px(9)}px; padding: {px(10)}px {px(14)}px; font-weight: 600; }}
             QPushButton#primary {{ background: {c['accent']}; color: {c['accent_text']}; border-color: {c['accent']}; }}
             QPushButton#secondary {{ background: {c['raised']}; }}
-            QPushButton#themeToggle {{ background: {c['raised']}; min-width: 190px; text-align: left; }}
+            QPushButton#themeToggle {{ background: {c['raised']}; min-width: {px(190)}px; text-align: left; }}
             QPushButton:hover {{ border-color: {c['text']}; }}
         """)
 
@@ -511,7 +575,8 @@ class Controller:
         self.settings = read_json(SETTINGS, DEFAULTS)
         self.window = MainWindow(self)
         self.overlay = Overlay(self.settings['theme'], self.settings.get('overlay_position'),
-                               self.overlay_position_changed)
+                               self.overlay_position_changed,
+                               self.settings.get('scale_percent', 100))
         self.tray = QSystemTrayIcon(make_icon(self.settings['theme']), app)
         self.menu = QMenu()
         self.status_action = self.menu.addAction('Minimal Whisper: checking…')

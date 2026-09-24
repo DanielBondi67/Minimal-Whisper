@@ -18,7 +18,7 @@ MODEL_CONFIG = Path.home() / '.config/minimal-whisper/models.json'
 LEGACY_MODEL_CONFIG = Path.home() / '.config/openai-whisper/models.json'
 BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
-            'shortcut': 'Meta+Ctrl+Y'}
+            'shortcut': 'Meta+Ctrl+Y', 'scale_percent': 100}
 
 
 def load_settings():

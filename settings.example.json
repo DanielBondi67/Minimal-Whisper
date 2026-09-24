@@ -2,6 +2,7 @@
   "model": "base",
   "language": "auto",
   "theme": "dark",
+  "scale_percent": 100,
   "shortcut": "Meta+Ctrl+Y",
   "overlay_position": null
 }
