@@ -205,17 +205,21 @@ class Overlay(QWidget):
 
     def apply_theme(self, theme):
         self.theme = theme
-        self.setStyleSheet('QWidget { background: transparent; color: #ffffff; }')
-        self.dot.setStyleSheet('color: #ffffff; font-size: 10px;')
-        self.label.setStyleSheet('color: #ffffff; font-size: 9px; font-weight: 700; letter-spacing: 1px;')
-        self.wave.color = QColor('#ffffff')
+        colors = THEMES[theme]
+        foreground = colors['accent_text']
+        self.background_color = QColor(colors['accent'])
+        self.setStyleSheet(f'QWidget {{ background: transparent; color: {foreground}; }}')
+        self.dot.setStyleSheet(f'color: {foreground}; font-size: 10px;')
+        self.label.setStyleSheet(
+            f'color: {foreground}; font-size: 9px; font-weight: 700; letter-spacing: 1px;')
+        self.wave.color = QColor(foreground)
         self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor('#000000'))
+        painter.setBrush(self.background_color)
         painter.drawRoundedRect(QRectF(self.rect()), 14, 14)
         painter.end()
 
