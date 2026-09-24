@@ -187,8 +187,8 @@ class Dictation:
 
 
 def main():
-    if MODEL not in ('base', 'base.en'):
-        print('WHISPER_PTT_MODEL must be base or base.en', file=sys.stderr)
+    if MODEL not in ('small', 'base', 'base.en'):
+        print('Model must be small, base, or base.en', file=sys.stderr)
         return 2
     dpy = display.Display()
     root = dpy.screen().root
