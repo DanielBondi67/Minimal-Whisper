@@ -104,7 +104,7 @@ class Waveform(QWidget):
         super().__init__(parent)
         self.color = color
         self.phase = 0.0
-        self.setMinimumSize(106, 28)
+        self.setMinimumSize(76, 24)
 
     def advance(self):
         self.phase += 0.24
@@ -135,10 +135,10 @@ class Overlay(QWidget):
         self.theme = theme
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedSize(330, 68)
+        self.setFixedSize(236, 54)
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(18, 10, 18, 10)
-        self.layout.setSpacing(12)
+        self.layout.setContentsMargins(13, 7, 13, 7)
+        self.layout.setSpacing(8)
         self.dot = QLabel('●')
         self.label = QLabel('LISTENING')
         self.label.setStyleSheet('font-size: 10px; font-weight: 700; letter-spacing: 1px;')
@@ -153,12 +153,19 @@ class Overlay(QWidget):
 
     def apply_theme(self, theme):
         self.theme = theme
-        c = THEMES[theme]
-        self.setStyleSheet(f"QWidget {{ background: {c['panel']}; color: {c['text']}; border-radius: 18px; }}")
-        self.dot.setStyleSheet(f"color: {c['accent']}; font-size: 11px;")
-        self.label.setStyleSheet(f"color: {c['text']}; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
-        self.wave.color = QColor(c['accent'])
+        self.setStyleSheet('QWidget { background: transparent; color: #ffffff; }')
+        self.dot.setStyleSheet('color: #ffffff; font-size: 10px;')
+        self.label.setStyleSheet('color: #ffffff; font-size: 9px; font-weight: 700; letter-spacing: 1px;')
+        self.wave.color = QColor('#ffffff')
         self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor('#000000'))
+        painter.drawRoundedRect(QRectF(self.rect()), 14, 14)
+        painter.end()
 
     def show_bottom_center(self):
         screen = QApplication.primaryScreen()
