@@ -1,0 +1,5 @@
+[
+  {"label": "Small · multilingual · 244M parameters", "model": "small"},
+  {"label": "Base · multilingual", "model": "base"},
+  {"label": "Base English · faster", "model": "base.en"}
+]

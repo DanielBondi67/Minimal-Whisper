@@ -11,6 +11,9 @@ fi
 if [[ ! -e "$HOME/.config/minimal-whisper/languages.json" && -f "$HOME/.config/openai-whisper/languages.json" ]]; then
     cp -p "$HOME/.config/openai-whisper/languages.json" "$HOME/.config/minimal-whisper/languages.json"
 fi
+if [[ ! -e "$HOME/.config/minimal-whisper/models.json" && -f "$HOME/.config/openai-whisper/models.json" ]]; then
+    cp -p "$HOME/.config/openai-whisper/models.json" "$HOME/.config/minimal-whisper/models.json"
+fi
 if [[ ! -e "$HOME/.local/state/minimal-whisper/status.json" && -f "$HOME/.local/state/openai-whisper/status.json" ]]; then
     cp -p "$HOME/.local/state/openai-whisper/status.json" "$HOME/.local/state/minimal-whisper/status.json"
 fi

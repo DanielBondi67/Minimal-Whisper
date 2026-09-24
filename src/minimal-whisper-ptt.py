@@ -14,6 +14,9 @@ from Xlib import X, XK, display, error
 CONFIG = Path.home() / '.config/minimal-whisper/settings.json'
 LEGACY_CONFIG = Path.home() / '.config/openai-whisper/settings.json'
 STATE = Path.home() / '.local/state/minimal-whisper/status.json'
+MODEL_CONFIG = Path.home() / '.config/minimal-whisper/models.json'
+LEGACY_MODEL_CONFIG = Path.home() / '.config/openai-whisper/models.json'
+BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y'}
 
@@ -27,9 +30,23 @@ def load_settings():
     return {**DEFAULTS, **settings}
 
 
+def load_models():
+    for path in (MODEL_CONFIG, LEGACY_MODEL_CONFIG, BUILTIN_MODEL_CONFIG):
+        try:
+            entries = json.loads(path.read_text(encoding='utf-8'))
+            models = {str(item['model']) for item in entries
+                      if isinstance(item, dict) and item.get('model')}
+            if models:
+                return models
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    return {'small', 'base', 'base.en'}
+
+
 SETTINGS = load_settings()
 MODEL = SETTINGS['model']
 LANGUAGE = SETTINGS['language']
+AVAILABLE_MODELS = load_models()
 PYTHON = Path.home() / '.local/opt/openai-whisper/bin/whisper'
 CACHE = Path.home() / '.cache/whisper'
 LOG = Path.home() / '.local/state/minimal-whisper/ptt.log'
@@ -187,8 +204,9 @@ class Dictation:
 
 
 def main():
-    if MODEL not in ('small', 'base', 'base.en'):
-        print('Model must be small, base, or base.en', file=sys.stderr)
+    if MODEL not in AVAILABLE_MODELS:
+        print(f'Model {MODEL!r} is not listed in ~/.config/minimal-whisper/models.json or config/models.json',
+              file=sys.stderr)
         return 2
     dpy = display.Display()
     root = dpy.screen().root

@@ -6,7 +6,7 @@ The repository contains the tray/settings UI, the X11 push-to-talk listener, and
 
 The settings app auto-saves its model, language, shortcut, and theme. The compact recording overlay can be dragged; its position persists and can be reset to bottom-center from Settings.
 
-Available transcription models include Small (multilingual, 244M parameters), Base (multilingual), and Base English. Small must be downloaded once before first use; model files are stored in `~/.cache/whisper`.
+Available transcription models include Small (multilingual, 244M parameters), Base (multilingual), and Base English. Small must be downloaded once before first use; model files are stored in `~/.cache/whisper`. To add an option, edit `config/models.json` or copy it to `~/.config/minimal-whisper/models.json` and add an entry with a display `label` and Whisper model identifier in `model`, such as `medium` or `large-v3`. The user config takes precedence over the bundled list, and Whisper downloads a model the first time it is used if it is not already cached.
 
 The language selector includes Automatic, English, German, Japanese, and Russian. To add or rename choices, edit `config/languages.json` in the project. It is a JSON list of labels and Whisper language codes; keep an `auto` entry for automatic detection. You can also create `~/.config/minimal-whisper/languages.json` in the same format to customize choices without editing the project. That user file takes precedence over the bundled list. The `base.en` model only supports English, so the settings app switches the language back to English when that model is selected.
 
@@ -17,6 +17,7 @@ The language selector includes Automatic, English, German, Japanese, and Russian
 - Example defaults: `settings.example.json` (`Meta` represents the Super key in Qt's portable shortcut format).
 - Whisper model cache: `~/.cache/whisper`
 - Language choices: `config/languages.json` (optional user override: `~/.config/minimal-whisper/languages.json`)
+- Model choices: `config/models.json` (optional user override: `~/.config/minimal-whisper/models.json`)
 - Runtime scripts in `~/.local/bin` link to `src/` in this repository.
 - User services, desktop launchers, and the icon link to the corresponding project files.
 - XFCE's systray hidden-item preference remains in `~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml` because it belongs to this desktop profile.

@@ -24,6 +24,9 @@ LEGACY_STATE = HOME / '.local/state/openai-whisper/status.json'
 LANGUAGE_CONFIG = HOME / '.config/minimal-whisper/languages.json'
 LEGACY_LANGUAGE_CONFIG = HOME / '.config/openai-whisper/languages.json'
 BUILTIN_LANGUAGE_CONFIG = Path(__file__).resolve().parent.parent / 'config/languages.json'
+MODEL_CONFIG = HOME / '.config/minimal-whisper/models.json'
+LEGACY_MODEL_CONFIG = HOME / '.config/openai-whisper/models.json'
+BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
 SERVICE = 'minimal-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None}
@@ -69,6 +72,21 @@ def read_languages():
             continue
     return [('Automatic', 'auto'), ('English', 'en'), ('German', 'de'),
             ('Japanese', 'ja'), ('Russian', 'ru')]
+
+
+def read_models():
+    """Load editable model labels and Whisper model identifiers."""
+    for path in (MODEL_CONFIG, LEGACY_MODEL_CONFIG, BUILTIN_MODEL_CONFIG):
+        try:
+            entries = json.loads(path.read_text(encoding='utf-8'))
+            models = [(str(item['label']), str(item['model'])) for item in entries
+                      if isinstance(item, dict) and item.get('label') and item.get('model')]
+            if models:
+                return models
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    return [('Small · multilingual · 244M parameters', 'small'),
+            ('Base · multilingual', 'base'), ('Base English · faster', 'base.en')]
 
 
 def write_settings(data):
@@ -321,9 +339,9 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(16, 14, 16, 14)
         form.setVerticalSpacing(13)
         self.model = QComboBox()
-        self.model.addItem('Small · multilingual · 244M parameters', 'small')
-        self.model.addItem('Base · multilingual', 'base')
-        self.model.addItem('Base English · faster', 'base.en')
+        self.models = read_models()
+        for label, model_id in self.models:
+            self.model.addItem(label, model_id)
         self.model.setCurrentIndex(max(0, self.model.findData(self.settings['model'])))
         self.language = QComboBox()
         self.languages = read_languages()
