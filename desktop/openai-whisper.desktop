@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OpenAI Whisper
+GenericName=Offline Voice Typing
+Comment=Configure and control offline speech transcription
+Exec=/home/archbtw/.local/bin/whisper-control --settings
+TryExec=/home/archbtw/.local/bin/whisper-control
+Icon=openai-whisper
+Terminal=false
+Categories=Utility;
+Keywords=whisper;voice;dictation;transcription;speech;microphone;
+StartupNotify=false

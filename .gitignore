@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.pt
+*.onnx
+settings.json
+status.json
+*.log

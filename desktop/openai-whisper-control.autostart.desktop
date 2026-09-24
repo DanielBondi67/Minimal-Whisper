@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OpenAI Whisper Tray
+Comment=Whisper status and settings tray icon
+Exec=systemctl --user start --no-block openai-whisper-control.service
+TryExec=/usr/bin/systemctl
+Icon=openai-whisper
+Terminal=false
+X-GNOME-Autostart-enabled=true
+StartupNotify=false
