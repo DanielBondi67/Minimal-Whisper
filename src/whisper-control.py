@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 HOME = Path.home()
 SETTINGS = HOME / '.config/openai-whisper/settings.json'
 STATE = HOME / '.local/state/openai-whisper/status.json'
+LANGUAGE_CONFIG = HOME / '.config/openai-whisper/languages.json'
+BUILTIN_LANGUAGE_CONFIG = Path(__file__).resolve().parent.parent / 'config/languages.json'
 SERVICE = 'openai-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None}
@@ -42,6 +44,21 @@ def read_json(path, default):
         return {**default, **json.loads(path.read_text(encoding='utf-8'))}
     except (OSError, ValueError, TypeError):
         return dict(default)
+
+
+def read_languages():
+    """Load editable language choices, falling back to the bundled defaults."""
+    for path in (LANGUAGE_CONFIG, BUILTIN_LANGUAGE_CONFIG):
+        try:
+            entries = json.loads(path.read_text(encoding='utf-8'))
+            languages = [(str(item['label']), str(item['code'])) for item in entries
+                         if isinstance(item, dict) and item.get('label') and item.get('code')]
+            if languages and any(code == 'auto' for _, code in languages):
+                return languages
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    return [('Automatic', 'auto'), ('English', 'en'), ('German', 'de'),
+            ('Japanese', 'ja'), ('Russian', 'ru')]
 
 
 def write_settings(data):
@@ -298,7 +315,8 @@ class MainWindow(QMainWindow):
         self.model.addItem('Base English · faster', 'base.en')
         self.model.setCurrentIndex(max(0, self.model.findData(self.settings['model'])))
         self.language = QComboBox()
-        for label, code in [('Automatic', 'auto'), ('English', 'en'), ('German', 'de')]:
+        self.languages = read_languages()
+        for label, code in self.languages:
             self.language.addItem(label, code)
         self.language.setCurrentIndex(max(0, self.language.findData(self.settings['language'])))
         self.shortcut = QKeySequenceEdit()

@@ -1,0 +1,7 @@
+[
+  {"label": "Automatic", "code": "auto"},
+  {"label": "English", "code": "en"},
+  {"label": "German", "code": "de"},
+  {"label": "Japanese", "code": "ja"},
+  {"label": "Russian", "code": "ru"}
+]
