@@ -2,5 +2,6 @@
   "model": "base",
   "language": "auto",
   "theme": "dark",
-  "shortcut": "Meta+Ctrl+Y"
+  "shortcut": "Meta+Ctrl+Y",
+  "overlay_position": null
 }

@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
+from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QPointF
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -21,7 +21,7 @@ SETTINGS = HOME / '.config/openai-whisper/settings.json'
 STATE = HOME / '.local/state/openai-whisper/status.json'
 SERVICE = 'openai-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
-            'shortcut': 'Meta+Ctrl+Y'}
+            'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None}
 
 THEMES = {
     'dark': {
@@ -128,11 +128,15 @@ class Waveform(QWidget):
 
 
 class Overlay(QWidget):
-    def __init__(self, theme):
+    def __init__(self, theme, position=None, position_changed=None):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.WindowStaysOnTopHint |
                          Qt.WindowType.WindowDoesNotAcceptFocus)
         self.theme = theme
+        self.saved_position = position
+        self.position_changed = position_changed
+        self.position_initialized = False
+        self.drag_offset = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedSize(236, 54)
@@ -141,8 +145,11 @@ class Overlay(QWidget):
         self.layout.setSpacing(8)
         self.dot = QLabel('●')
         self.label = QLabel('LISTENING')
+        for child in (self.dot, self.label):
+            child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.label.setStyleSheet('font-size: 10px; font-weight: 700; letter-spacing: 1px;')
         self.wave = Waveform(QColor(THEMES[theme]['accent']))
+        self.wave.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.layout.addWidget(self.dot)
         self.layout.addWidget(self.label)
         self.layout.addWidget(self.wave, 1)
@@ -168,12 +175,82 @@ class Overlay(QWidget):
         painter.end()
 
     def show_bottom_center(self):
-        screen = QApplication.primaryScreen()
-        if screen:
-            area = screen.availableGeometry()
-            self.move(area.x() + (area.width() - self.width()) // 2,
-                      area.y() + area.height() - self.height() - 26)
+        if not self.position_initialized:
+            position = self.saved_position
+            if isinstance(position, dict) and all(k in position for k in ('x', 'y')):
+                desired = QPoint(int(position['x']), int(position['y']))
+            else:
+                desired = self.bottom_center_position()
+            self.position_initialized = True
+        else:
+            desired = self.pos()
+        clamped = self.clamp_position(desired)
+        if clamped != desired:
+            self.saved_position = {'x': clamped.x(), 'y': clamped.y()}
+            if self.position_changed:
+                self.position_changed(self.saved_position)
+        self.move(clamped)
         self.show()
+
+    def bottom_center_position(self):
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return QPoint(0, 0)
+        area = screen.availableGeometry()
+        return QPoint(area.x() + (area.width() - self.width()) // 2,
+                      area.y() + area.height() - self.height() - 26)
+
+    def clamp_position(self, position):
+        screens = QApplication.screens()
+        if not screens:
+            return position
+        center = QPoint(position.x() + self.width() // 2,
+                        position.y() + self.height() // 2)
+
+        def distance_to_screen(screen):
+            rect = screen.availableGeometry()
+            dx = max(rect.left() - center.x(), 0, center.x() - rect.right())
+            dy = max(rect.top() - center.y(), 0, center.y() - rect.bottom())
+            return dx * dx + dy * dy
+
+        area = min(screens, key=distance_to_screen).availableGeometry()
+        max_x = max(area.left(), area.right() - self.width() + 1)
+        max_y = max(area.top(), area.bottom() - self.height() + 1)
+        return QPoint(max(area.left(), min(position.x(), max_x)),
+                      max(area.top(), min(position.y(), max_y)))
+
+    def reset_position(self):
+        self.saved_position = None
+        self.position_initialized = True
+        self.move(self.clamp_position(self.bottom_center_position()))
+        if self.position_changed:
+            self.position_changed(None)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            desired = event.globalPosition().toPoint() - self.drag_offset
+            self.move(self.clamp_position(desired))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.drag_offset is not None:
+            self.drag_offset = None
+            self.position_initialized = True
+            self.saved_position = {'x': self.x(), 'y': self.y()}
+            if self.position_changed:
+                self.position_changed(self.saved_position)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -238,6 +315,9 @@ class MainWindow(QMainWindow):
         form.addRow('Language', self.language)
         form.addRow('Shortcut', self.shortcut)
         form.addRow('Theme', self.theme_toggle)
+        self.reset_overlay = QPushButton('Reset to bottom-center')
+        self.reset_overlay.setObjectName('secondary')
+        form.addRow('Indicator position', self.reset_overlay)
         layout.addWidget(card)
 
         self.hotkey = QLabel()
@@ -264,6 +344,7 @@ class MainWindow(QMainWindow):
         self.language.currentIndexChanged.connect(lambda _index: self.schedule_save())
         self.shortcut.keySequenceChanged.connect(self.shortcut_changed)
         self.theme_toggle.clicked.connect(self.toggle_theme)
+        self.reset_overlay.clicked.connect(self.app.reset_overlay_position)
 
     def update_theme_button(self):
         self.theme_toggle.setText('Dark · click to switch' if self.theme_toggle.isChecked()
@@ -312,6 +393,7 @@ class MainWindow(QMainWindow):
             'language': selected_language,
             'theme': 'dark' if self.theme_toggle.isChecked() else 'light',
             'shortcut': shortcut,
+            'overlay_position': self.app.settings.get('overlay_position'),
         }
 
     def apply_theme(self):
@@ -381,7 +463,8 @@ class Controller:
         self.app = app
         self.settings = read_json(SETTINGS, DEFAULTS)
         self.window = MainWindow(self)
-        self.overlay = Overlay(self.settings['theme'])
+        self.overlay = Overlay(self.settings['theme'], self.settings.get('overlay_position'),
+                               self.overlay_position_changed)
         self.tray = QSystemTrayIcon(make_icon(self.settings['theme']), app)
         self.menu = QMenu()
         self.status_action = self.menu.addAction('Whisper: checking…')
@@ -420,6 +503,14 @@ class Controller:
         action = 'stop' if service_state() == 'active' else 'start'
         service_action(action)
         QTimer.singleShot(600, self.refresh_status)
+
+    def overlay_position_changed(self, position):
+        self.settings['overlay_position'] = position
+        self.window.settings['overlay_position'] = position
+        self.window.schedule_save(300)
+
+    def reset_overlay_position(self):
+        self.overlay.reset_position()
 
     def refresh_theme(self):
         self.tray.setIcon(make_icon(self.settings['theme']))

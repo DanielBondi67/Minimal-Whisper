@@ -4,6 +4,8 @@ User-level XFCE/X11 controls for the locally installed OpenAI Whisper push-to-ta
 
 The repository contains the tray/settings UI, the X11 push-to-talk listener, and the user-level systemd and desktop-entry templates. The local Whisper virtual environment, downloaded model weights, runtime state, and personal settings are intentionally kept outside Git.
 
+The settings app auto-saves its model, language, shortcut, and theme. The compact recording overlay can be dragged; its position persists and can be reset to bottom-center from Settings.
+
 ## Runtime locations
 
 - Project source: `~/Projects/openai-whisper-control`
