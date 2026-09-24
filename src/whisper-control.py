@@ -371,7 +371,6 @@ class MainWindow(QMainWindow):
         portable = sequence.toString(QKeySequence.SequenceFormat.PortableText)
         self.update_hotkey_hint()
         if not valid_shortcut_sequence(portable):
-            self._save_timer.stop()
             self.message.setText('Enter a complete shortcut to save.')
             return
         self.schedule_save(700)
@@ -380,7 +379,7 @@ class MainWindow(QMainWindow):
         shortcut = self.shortcut.keySequence().toString(
             QKeySequence.SequenceFormat.PortableText)
         if not valid_shortcut_sequence(shortcut):
-            return None
+            shortcut = self.settings.get('shortcut', DEFAULTS['shortcut'])
         selected_model = self.model.currentData()
         selected_language = self.language.currentData()
         if selected_model == 'base.en' and selected_language not in ('auto', 'en'):
@@ -419,9 +418,6 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         updated = self.collect_settings()
-        if updated is None:
-            self.message.setText('Enter a complete shortcut to save.')
-            return
         self._save_timer.stop()
         previous = self.settings
         try:
