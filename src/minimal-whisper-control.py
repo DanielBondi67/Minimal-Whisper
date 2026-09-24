@@ -17,11 +17,14 @@ from PySide6.QtWidgets import (
 )
 
 HOME = Path.home()
-SETTINGS = HOME / '.config/openai-whisper/settings.json'
-STATE = HOME / '.local/state/openai-whisper/status.json'
-LANGUAGE_CONFIG = HOME / '.config/openai-whisper/languages.json'
+SETTINGS = HOME / '.config/minimal-whisper/settings.json'
+LEGACY_SETTINGS = HOME / '.config/openai-whisper/settings.json'
+STATE = HOME / '.local/state/minimal-whisper/status.json'
+LEGACY_STATE = HOME / '.local/state/openai-whisper/status.json'
+LANGUAGE_CONFIG = HOME / '.config/minimal-whisper/languages.json'
+LEGACY_LANGUAGE_CONFIG = HOME / '.config/openai-whisper/languages.json'
 BUILTIN_LANGUAGE_CONFIG = Path(__file__).resolve().parent.parent / 'config/languages.json'
-SERVICE = 'openai-whisper-ptt.service'
+SERVICE = 'minimal-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None}
 
@@ -40,15 +43,22 @@ THEMES = {
 
 
 def read_json(path, default):
-    try:
-        return {**default, **json.loads(path.read_text(encoding='utf-8'))}
-    except (OSError, ValueError, TypeError):
-        return dict(default)
+    candidates = [path]
+    if path == SETTINGS:
+        candidates.append(LEGACY_SETTINGS)
+    elif path == STATE:
+        candidates.append(LEGACY_STATE)
+    for candidate in candidates:
+        try:
+            return {**default, **json.loads(candidate.read_text(encoding='utf-8'))}
+        except (OSError, ValueError, TypeError):
+            continue
+    return dict(default)
 
 
 def read_languages():
     """Load editable language choices, falling back to the bundled defaults."""
-    for path in (LANGUAGE_CONFIG, BUILTIN_LANGUAGE_CONFIG):
+    for path in (LANGUAGE_CONFIG, LEGACY_LANGUAGE_CONFIG, BUILTIN_LANGUAGE_CONFIG):
         try:
             entries = json.loads(path.read_text(encoding='utf-8'))
             languages = [(str(item['label']), str(item['code'])) for item in entries
@@ -275,7 +285,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.app = app
         self.settings = read_json(SETTINGS, DEFAULTS)
-        self.setWindowTitle('Whisper Settings')
+        self.setWindowTitle('Minimal Whisper Settings')
         self.setWindowIcon(make_icon(self.settings['theme']))
         self.setFixedWidth(430)
         self.build_ui()
@@ -292,7 +302,7 @@ class MainWindow(QMainWindow):
 
         heading = QHBoxLayout()
         titlebox = QVBoxLayout()
-        title = QLabel('Whisper')
+        title = QLabel('Minimal Whisper')
         title.setObjectName('title')
         subtitle = QLabel('Offline voice typing')
         subtitle.setObjectName('muted')
@@ -481,7 +491,7 @@ class Controller:
                                self.overlay_position_changed)
         self.tray = QSystemTrayIcon(make_icon(self.settings['theme']), app)
         self.menu = QMenu()
-        self.status_action = self.menu.addAction('Whisper: checking…')
+        self.status_action = self.menu.addAction('Minimal Whisper: checking…')
         self.status_action.setEnabled(False)
         self.menu.addSeparator()
         self.settings_action = self.menu.addAction('Settings')
@@ -489,7 +499,7 @@ class Controller:
         self.menu.addSeparator()
         self.quit_action = self.menu.addAction('Quit tray app')
         self.tray.setContextMenu(self.menu)
-        self.tray.setToolTip('OpenAI Whisper · checking status')
+        self.tray.setToolTip('Minimal Whisper · checking status')
         self.tray.activated.connect(self.tray_activated)
         self.settings_action.triggered.connect(self.show_settings)
         self.toggle_action.triggered.connect(self.toggle_service)
@@ -554,29 +564,29 @@ class Controller:
         badge = f'●  {label}'
         self.window.state_badge.setText(badge)
         self.window.toggle.setText('Stop Whisper' if running else 'Start Whisper')
-        self.menu.actions()[0].setText(f'Whisper: {label}')
+        self.menu.actions()[0].setText(f'Minimal Whisper: {label}')
         self.toggle_action.setText('Stop Whisper' if running else 'Start Whisper')
         model = current.get('model', self.settings['model'])
-        self.tray.setToolTip(f'OpenAI Whisper · {label} · {model}')
+        self.tray.setToolTip(f'Minimal Whisper · {label} · {model}')
 
 
 def main():
     open_settings = '--background' not in sys.argv
     os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
     app = QApplication(sys.argv)
-    app.setApplicationName('OpenAI Whisper')
+    app.setApplicationName('Minimal Whisper')
     app.setQuitOnLastWindowClosed(False)
     socket = QLocalSocket()
-    socket.connectToServer('openai-whisper-control')
+    socket.connectToServer('minimal-whisper-control')
     if socket.waitForConnected(1000):
         if open_settings:
             socket.write(b'show')
             socket.waitForBytesWritten(500)
         return 0
-    QLocalServer.removeServer('openai-whisper-control')
+    QLocalServer.removeServer('minimal-whisper-control')
     server = QLocalServer()
-    if not server.listen('openai-whisper-control'):
-        print(f'Could not create the Whisper UI instance socket: {server.errorString()}',
+    if not server.listen('minimal-whisper-control'):
+        print(f'Could not create the Minimal Whisper instance socket: {server.errorString()}',
               file=sys.stderr)
         return 1
     if not QSystemTrayIcon.isSystemTrayAvailable():

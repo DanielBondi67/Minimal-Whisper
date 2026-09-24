@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=OpenAI Whisper Push-to-Talk
+Name=Minimal Whisper Push-to-Talk
 Comment=Hold Super+Ctrl+Y to record and transcribe offline
-Exec=systemctl --user start --no-block openai-whisper-ptt.service
+Exec=systemctl --user start --no-block minimal-whisper-ptt.service
 TryExec=/usr/bin/systemctl
 Terminal=false
 X-GNOME-Autostart-enabled=true

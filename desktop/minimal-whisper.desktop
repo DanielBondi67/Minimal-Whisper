@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Minimal Whisper
+GenericName=Offline Voice Typing
+Comment=Configure and control Minimal Whisper offline transcription
+Exec=/home/archbtw/.local/bin/minimal-whisper-control.py --settings
+TryExec=/home/archbtw/.local/bin/minimal-whisper-control.py
+Icon=minimal-whisper
+Terminal=false
+Categories=Utility;
+Keywords=whisper;voice;dictation;transcription;speech;microphone;
+StartupNotify=false

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Minimal Whisper Tray
+Comment=Minimal Whisper status and settings tray icon
+Exec=systemctl --user start --no-block minimal-whisper-control.service
+TryExec=/usr/bin/systemctl
+Icon=minimal-whisper
+Terminal=false
+X-GNOME-Autostart-enabled=true
+StartupNotify=false

@@ -11,15 +11,17 @@ from pathlib import Path
 
 from Xlib import X, XK, display, error
 
-CONFIG = Path.home() / '.config/openai-whisper/settings.json'
-STATE = Path.home() / '.local/state/openai-whisper/status.json'
+CONFIG = Path.home() / '.config/minimal-whisper/settings.json'
+LEGACY_CONFIG = Path.home() / '.config/openai-whisper/settings.json'
+STATE = Path.home() / '.local/state/minimal-whisper/status.json'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y'}
 
 
 def load_settings():
     try:
-        settings = json.loads(CONFIG.read_text(encoding='utf-8'))
+        config = CONFIG if CONFIG.exists() else LEGACY_CONFIG
+        settings = json.loads(config.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         settings = {}
     return {**DEFAULTS, **settings}
@@ -30,7 +32,7 @@ MODEL = SETTINGS['model']
 LANGUAGE = SETTINGS['language']
 PYTHON = Path.home() / '.local/opt/openai-whisper/bin/whisper'
 CACHE = Path.home() / '.cache/whisper'
-LOG = Path.home() / '.local/state/whisper-ptt.log'
+LOG = Path.home() / '.local/state/minimal-whisper/ptt.log'
 
 
 def log(message):
@@ -90,7 +92,7 @@ class Dictation:
         self.pressed = False
 
     def start(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='whisper-ptt-')
+        self.temp = tempfile.TemporaryDirectory(prefix='minimal-whisper-')
         self.wav = Path(self.temp.name) / 'recording.wav'
         logfile = LOG.open('a', encoding='utf-8')
         try:
@@ -102,7 +104,7 @@ class Dictation:
             logfile.close()
         time.sleep(0.15)
         if self.recorder.poll() is not None:
-            raise RuntimeError('pw-record exited before capture started; see ~/.local/state/whisper-ptt.log')
+            raise RuntimeError('pw-record exited before capture started; see ~/.local/state/minimal-whisper/ptt.log')
         self.pressed = True
         set_state('recording')
         log(f'recording started model={MODEL}')
@@ -126,7 +128,7 @@ class Dictation:
             temp.cleanup()
             return
 
-        notify('Transcribing', 'OpenAI Whisper is transcribing locally')
+        notify('Transcribing', 'Speech is being transcribed locally')
         set_state('transcribing')
         command = [str(PYTHON), str(wav), '--model', MODEL, '--model_dir', str(CACHE),
                    '--device', 'cpu', '--fp16', 'False', '--verbose', 'False',
@@ -140,7 +142,7 @@ class Dictation:
             output = wav.with_suffix('.txt')
             text = output.read_text(encoding='utf-8').strip() if output.exists() else ''
             if result.returncode != 0:
-                raise RuntimeError(f'Whisper exited with status {result.returncode}; see ~/.local/state/whisper-ptt.log')
+                raise RuntimeError(f'Whisper exited with status {result.returncode}; see ~/.local/state/minimal-whisper/ptt.log')
             if not text:
                 notify('No speech detected', 'Try again, speaking clearly into the default microphone.')
                 log('transcription completed with no text')
