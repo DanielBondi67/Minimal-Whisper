@@ -206,13 +206,13 @@ class Overlay(QWidget):
     def apply_theme(self, theme):
         self.theme = theme
         colors = THEMES[theme]
-        foreground = colors['accent_text']
-        self.background_color = QColor(colors['accent'])
+        foreground = colors['text']
+        self.background_color = QColor(colors['panel'])
         self.setStyleSheet(f'QWidget {{ background: transparent; color: {foreground}; }}')
         self.dot.setStyleSheet(f'color: {foreground}; font-size: 10px;')
         self.label.setStyleSheet(
             f'color: {foreground}; font-size: 9px; font-weight: 700; letter-spacing: 1px;')
-        self.wave.color = QColor(foreground)
+        self.wave.color = QColor(colors['accent'])
         self.update()
 
     def paintEvent(self, _event):
