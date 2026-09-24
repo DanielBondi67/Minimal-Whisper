@@ -6,6 +6,8 @@ The repository contains the tray/settings UI, the X11 push-to-talk listener, and
 
 The settings app auto-saves its model, language, shortcut, and theme. The compact recording overlay can be dragged; its position persists and can be reset to bottom-center from Settings.
 
+Available transcription models include Tiny (the smallest multilingual Whisper model), Base (multilingual), and Base English. Tiny must be downloaded once before first use; model files are stored in `~/.cache/whisper`.
+
 The language selector includes Automatic, English, German, Japanese, and Russian. To add or rename choices, edit `config/languages.json` in the project. It is a JSON list of labels and Whisper language codes; keep an `auto` entry for automatic detection. You can also create `~/.config/minimal-whisper/languages.json` in the same format to customize choices without editing the project. That user file takes precedence over the bundled list. The `base.en` model only supports English, so the settings app switches the language back to English when that model is selected.
 
 ## Runtime locations

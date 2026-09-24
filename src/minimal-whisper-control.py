@@ -321,6 +321,7 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(16, 14, 16, 14)
         form.setVerticalSpacing(13)
         self.model = QComboBox()
+        self.model.addItem('Tiny · multilingual · smallest', 'tiny')
         self.model.addItem('Base · multilingual', 'base')
         self.model.addItem('Base English · faster', 'base.en')
         self.model.setCurrentIndex(max(0, self.model.findData(self.settings['model'])))
