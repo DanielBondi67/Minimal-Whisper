@@ -1,4 +1,4 @@
-# OpenAI Whisper control app
+# Minimal Whisper
 
 User-level XFCE/X11 controls for the locally installed OpenAI Whisper push-to-talk setup.
 
@@ -8,7 +8,7 @@ The settings app auto-saves its model, language, shortcut, and theme. The compac
 
 ## Runtime locations
 
-- Project source: `~/Projects/openai-whisper-control`
+- Project source: `~/Projects/Minimal Whisper`
 - Settings: `~/.config/openai-whisper/settings.json`
 - Example defaults: `settings.example.json` (`Meta` represents the Super key in Qt's portable shortcut format).
 - Whisper model cache: `~/.cache/whisper`
