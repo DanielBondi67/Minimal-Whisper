@@ -58,6 +58,13 @@ def shortcut_label(sequence):
     return label.replace('Meta', 'Super').replace('+', ' + ')
 
 
+def valid_shortcut_sequence(sequence):
+    parts = [part.strip().lower() for part in sequence.split('+') if part.strip()]
+    modifiers = {'ctrl', 'control', 'meta', 'super', 'alt', 'shift'}
+    return len(parts) >= 2 and all(part in modifiers for part in parts[:-1]) \
+        and parts[-1] not in modifiers
+
+
 def service_state():
     try:
         result = subprocess.run(['systemctl', '--user', 'is-active', SERVICE],
@@ -174,6 +181,9 @@ class MainWindow(QMainWindow):
         self.apply_theme()
 
     def build_ui(self):
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self.save_settings)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(26, 24, 26, 22)
@@ -229,24 +239,23 @@ class MainWindow(QMainWindow):
         self.update_hotkey_hint()
         layout.addWidget(self.hotkey)
 
-        self.message = QLabel('Changes apply when you save.')
+        self.message = QLabel('Saved')
         self.message.setObjectName('muted')
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
 
         buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.toggle = QPushButton('Stop Whisper')
+        self.toggle = QPushButton('Stop Whisper' if service_state() == 'active' else 'Start Whisper')
         self.toggle.setObjectName('secondary')
-        self.save = QPushButton('Save settings')
-        self.save.setObjectName('primary')
         buttons.addWidget(self.toggle)
-        buttons.addWidget(self.save)
+        buttons.addStretch(1)
         layout.addLayout(buttons)
         self.setCentralWidget(root)
-        self.save.clicked.connect(self.save_settings)
         self.toggle.clicked.connect(self.toggle_service)
         self.shortcut.keySequenceChanged.connect(lambda _sequence: self.update_hotkey_hint())
+        self.model.currentIndexChanged.connect(lambda _index: self.schedule_save())
+        self.language.currentIndexChanged.connect(lambda _index: self.schedule_save())
+        self.shortcut.keySequenceChanged.connect(self.shortcut_changed)
         self.theme_toggle.clicked.connect(self.toggle_theme)
 
     def update_theme_button(self):
@@ -259,20 +268,44 @@ class MainWindow(QMainWindow):
         self.hotkey.setText(f'Hold  {shortcut_label(sequence)}  to record, then release to transcribe')
 
     def toggle_theme(self, dark_enabled):
-        updated = read_json(SETTINGS, DEFAULTS)
-        updated['theme'] = 'dark' if dark_enabled else 'light'
-        try:
-            write_settings(updated)
-        except OSError as exc:
-            self.theme_toggle.setChecked(not dark_enabled)
-            self.message.setText(f'Could not save theme: {exc}')
-            return
-        self.settings['theme'] = updated['theme']
-        self.app.settings['theme'] = updated['theme']
+        self.settings['theme'] = 'dark' if dark_enabled else 'light'
+        self.app.settings['theme'] = self.settings['theme']
         self.update_theme_button()
         self.apply_theme()
         self.app.refresh_theme()
-        self.message.setText(f'{updated["theme"].title()} theme enabled.')
+        self.schedule_save(150)
+
+    def schedule_save(self, delay=350):
+        self.message.setText('Saving…')
+        self._save_timer.start(delay)
+
+    def shortcut_changed(self, sequence):
+        portable = sequence.toString(QKeySequence.SequenceFormat.PortableText)
+        self.update_hotkey_hint()
+        if not valid_shortcut_sequence(portable):
+            self._save_timer.stop()
+            self.message.setText('Enter a complete shortcut to save.')
+            return
+        self.schedule_save(700)
+
+    def collect_settings(self):
+        shortcut = self.shortcut.keySequence().toString(
+            QKeySequence.SequenceFormat.PortableText)
+        if not valid_shortcut_sequence(shortcut):
+            return None
+        selected_model = self.model.currentData()
+        selected_language = self.language.currentData()
+        if selected_model == 'base.en' and selected_language not in ('auto', 'en'):
+            selected_language = 'en'
+            self.language.blockSignals(True)
+            self.language.setCurrentIndex(self.language.findData('en'))
+            self.language.blockSignals(False)
+        return {
+            'model': selected_model,
+            'language': selected_language,
+            'theme': 'dark' if self.theme_toggle.isChecked() else 'light',
+            'shortcut': shortcut,
+        }
 
     def apply_theme(self):
         c = THEMES[self.settings['theme']]
@@ -296,41 +329,33 @@ class MainWindow(QMainWindow):
         """)
 
     def save_settings(self):
-        shortcut = self.shortcut.keySequence().toString(
-            QKeySequence.SequenceFormat.PortableText)
-        if not shortcut:
-            self.message.setText('Choose a shortcut with at least one key.')
+        updated = self.collect_settings()
+        if updated is None:
+            self.message.setText('Enter a complete shortcut to save.')
             return
-        self.update_hotkey_hint()
-        selected_model = self.model.currentData()
-        selected_language = self.language.currentData()
-        if selected_model == 'base.en' and selected_language not in ('auto', 'en'):
-            self.language.setCurrentIndex(self.language.findData('en'))
-            selected_language = 'en'
-        updated = {'model': self.model.currentData(),
-                   'language': selected_language,
-                   'theme': 'dark' if self.theme_toggle.isChecked() else 'light',
-                   'shortcut': shortcut}
+        self._save_timer.stop()
+        previous = self.settings
         try:
             write_settings(updated)
         except OSError as exc:
             self.message.setText(f'Could not save settings: {exc}')
             return
-        was_running = service_state() == 'active'
+        self.settings = updated
+        self.app.settings.update(updated)
+        listener_settings_changed = any(
+            previous.get(key, DEFAULTS[key]) != updated[key]
+            for key in ('model', 'language', 'shortcut')
+        )
+        was_running = listener_settings_changed and service_state() == 'active'
+        self.message.setText('Applying…' if was_running else 'Saved')
         if was_running:
             result = service_action('restart')
             if isinstance(result, Exception) or result.returncode:
                 detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
-                self.message.setText(f'Saved, but restart failed: {detail or "unknown error"}')
-                self.settings = updated
-                self.app.settings = updated
-                self.app.refresh_theme()
-                return
-        self.settings = updated
-        self.app.settings = updated
+                self.message.setText(f'Saved, but could not apply: {detail or "unknown error"}')
+            else:
+                self.message.setText('Saved')
         self.app.refresh_theme()
-        self.message.setText('Settings saved. Whisper restarted with the new options.' if was_running
-                             else 'Settings saved. Start Whisper to use them.')
         self.app.refresh_status()
 
     def toggle_service(self):
