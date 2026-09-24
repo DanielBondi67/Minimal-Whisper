@@ -366,7 +366,7 @@ class MainWindow(QMainWindow):
             self.message.setText(f'Could not change Whisper state: {detail or "unknown error"}')
         else:
             self.message.setText('Whisper stopped.' if active else 'Whisper started.')
-        QTimer.singleShot(600, self.app.refresh_status)
+        self.app.refresh_status()
 
 
 class Controller:
@@ -441,6 +441,7 @@ class Controller:
                  'stopped': 'Stopped'}.get(state, state.title())
         badge = f'●  {label}'
         self.window.state_badge.setText(badge)
+        self.window.toggle.setText('Stop Whisper' if running else 'Start Whisper')
         self.menu.actions()[0].setText(f'Whisper: {label}')
         self.toggle_action.setText('Stop Whisper' if running else 'Start Whisper')
         model = current.get('model', self.settings['model'])
