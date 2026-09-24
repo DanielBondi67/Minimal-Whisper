@@ -13,7 +13,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QKeySequenceEdit, QMainWindow, QMenu, QPushButton, QSystemTrayIcon,
-    QSlider, QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget,
 )
 
 HOME = Path.home()
@@ -31,6 +31,15 @@ SERVICE = 'minimal-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None,
             'scale_percent': 100}
+SCALE_PRESETS = (75, 100, 125, 150)
+
+
+def normalized_scale(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = 100
+    return min(SCALE_PRESETS, key=lambda preset: abs(preset - value))
 
 THEMES = {
     'dark': {
@@ -332,6 +341,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.app = app
         self.settings = read_json(SETTINGS, DEFAULTS)
+        self.settings['scale_percent'] = normalized_scale(
+            self.settings.get('scale_percent', 100))
         self.setWindowTitle('Minimal Whisper Settings')
         self.setWindowIcon(make_icon(self.settings['theme']))
         self.build_ui()
@@ -389,21 +400,12 @@ class MainWindow(QMainWindow):
         form.addRow('Language', self.language)
         form.addRow('Shortcut', self.shortcut)
         form.addRow('Theme', self.theme_toggle)
-        scale_row = QWidget()
-        scale_layout = QHBoxLayout(scale_row)
-        self.scale_layout = scale_layout
-        scale_layout.setContentsMargins(0, 0, 0, 0)
-        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
-        self.scale_slider.setRange(75, 150)
-        self.scale_slider.setSingleStep(5)
-        self.scale_slider.setPageStep(10)
-        self.scale_slider.setValue(max(75, min(150,
-                                     int(self.settings.get('scale_percent', 100)))))
-        self.scale_label = QLabel(f'{self.scale_slider.value()}%')
-        self.scale_label.setMinimumWidth(42)
-        scale_layout.addWidget(self.scale_slider, 1)
-        scale_layout.addWidget(self.scale_label)
-        form.addRow('UI scale', scale_row)
+        self.scale_selector = QComboBox()
+        for percent in (75, 100, 125, 150):
+            self.scale_selector.addItem(f'{percent}%', percent)
+        nearest_scale = normalized_scale(self.settings.get('scale_percent', 100))
+        self.scale_selector.setCurrentIndex(self.scale_selector.findData(nearest_scale))
+        form.addRow('UI scale', self.scale_selector)
         self.reset_overlay = QPushButton('Reset to bottom-center')
         self.reset_overlay.setObjectName('secondary')
         form.addRow('Indicator position', self.reset_overlay)
@@ -431,7 +433,7 @@ class MainWindow(QMainWindow):
         self.shortcut.keySequenceChanged.connect(lambda _sequence: self.update_hotkey_hint())
         self.model.currentIndexChanged.connect(lambda _index: self.schedule_save())
         self.language.currentIndexChanged.connect(lambda _index: self.schedule_save())
-        self.scale_slider.valueChanged.connect(self.scale_changed)
+        self.scale_selector.currentIndexChanged.connect(self.scale_changed)
         self.shortcut.keySequenceChanged.connect(self.shortcut_changed)
         self.theme_toggle.clicked.connect(self.toggle_theme)
         self.reset_overlay.clicked.connect(self.app.reset_overlay_position)
@@ -453,8 +455,8 @@ class MainWindow(QMainWindow):
         self.app.refresh_theme()
         self.schedule_save(150)
 
-    def scale_changed(self, percent):
-        self.scale_label.setText(f'{percent}%')
+    def scale_changed(self, _index):
+        percent = self.scale_selector.currentData()
         self.settings['scale_percent'] = percent
         self.app.settings['scale_percent'] = percent
         self.apply_scale()
@@ -463,7 +465,7 @@ class MainWindow(QMainWindow):
         self.schedule_save()
 
     def apply_scale(self):
-        self.scale_factor = self.scale_slider.value() / 100
+        self.scale_factor = self.scale_selector.currentData() / 100
         self.setFixedWidth(round(430 * self.scale_factor))
         self.root_layout.setContentsMargins(*(
             round(n * self.scale_factor) for n in (26, 24, 26, 22)))
@@ -471,9 +473,6 @@ class MainWindow(QMainWindow):
         self.form_layout.setContentsMargins(*(
             round(n * self.scale_factor) for n in (16, 14, 16, 14)))
         self.form_layout.setVerticalSpacing(round(13 * self.scale_factor))
-        self.scale_layout.setSpacing(round(8 * self.scale_factor))
-        self.scale_label.setMinimumWidth(round(42 * self.scale_factor))
-        self.scale_label.setText(f'{self.scale_slider.value()}%')
         self.apply_theme()
 
     def schedule_save(self, delay=350):
@@ -504,7 +503,7 @@ class MainWindow(QMainWindow):
             'model': selected_model,
             'language': selected_language,
             'theme': 'dark' if self.theme_toggle.isChecked() else 'light',
-            'scale_percent': self.scale_slider.value(),
+            'scale_percent': self.scale_selector.currentData(),
             'shortcut': shortcut,
             'overlay_position': self.app.settings.get('overlay_position'),
         }
@@ -573,6 +572,8 @@ class Controller:
     def __init__(self, app, open_settings=False):
         self.app = app
         self.settings = read_json(SETTINGS, DEFAULTS)
+        self.settings['scale_percent'] = normalized_scale(
+            self.settings.get('scale_percent', 100))
         self.window = MainWindow(self)
         self.overlay = Overlay(self.settings['theme'], self.settings.get('overlay_position'),
                                self.overlay_position_changed,
