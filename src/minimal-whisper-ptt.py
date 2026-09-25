@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_backend import AudioBackend
 from audio_waveform import pcm_waveform_levels, wav_data_offset
+from operation_epoch import OperationEpoch
 from shortcut_cancel import ShortcutReleaseGate
 from text_output import normalize_transcription
 
@@ -107,9 +108,9 @@ def notify(title, body):
     return None
 
 
-def insert_transcription(text, dictation):
+def insert_transcription(text, dictation, cancel_event, operation_id):
     global KEYBOARD_PORTAL
-    if dictation.cancel_requested.is_set():
+    if not dictation.operation_is_current(operation_id, cancel_event):
         return None
     text = normalize_transcription(text)
     is_wayland = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
@@ -121,27 +122,42 @@ def insert_transcription(text, dictation):
             if KEYBOARD_PORTAL is None:
                 from wayland_portal import RemoteKeyboardPortal
                 KEYBOARD_PORTAL = RemoteKeyboardPortal()
-            if KEYBOARD_PORTAL.type_text(text, cancelled=dictation.cancel_requested.is_set):
+            if KEYBOARD_PORTAL.type_text(
+                    text, cancelled=lambda: not dictation.operation_is_current(
+                        operation_id, cancel_event)):
                 return 'typed through the Remote Desktop portal'
             portal_error = KEYBOARD_PORTAL.error or ''
         except Exception as exc:
             portal_error = str(exc)
-        if dictation.cancel_requested.is_set():
+        if not dictation.operation_is_current(operation_id, cancel_event):
             return None
-        QGuiApplication.clipboard().setText(text)
+        copied = dictation.operation_epoch.run_if_current(
+            operation_id, cancel_event,
+            lambda: QGuiApplication.clipboard().setText(text))
+        if not copied:
+            return None
         detail = 'Copied transcription to clipboard; paste it yourself.'
         if portal_error:
             detail += f' Keyboard portal: {portal_error}'
         set_state('listening', detail)
         log(detail)
         return 'copied to clipboard for manual paste'
-    process = subprocess.Popen(
-        ['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
-        stdin=subprocess.DEVNULL)
-    dictation.typing_process = process
+    process_holder = []
+
+    def start_typing():
+        process = subprocess.Popen(
+            ['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
+            stdin=subprocess.DEVNULL, start_new_session=True)
+        dictation.typing_process = process
+        process_holder.append(process)
+
+    if not dictation.operation_epoch.run_if_current(
+            operation_id, cancel_event, start_typing):
+        return None
+    process = process_holder[0]
     try:
         while process.poll() is None:
-            if dictation.cancel_requested.wait(0.02):
+            if cancel_event.wait(0.02):
                 if process.poll() is None:
                     process.terminate()
                 break
@@ -149,7 +165,7 @@ def insert_transcription(text, dictation):
     finally:
         if dictation.typing_process is process:
             dictation.typing_process = None
-    if dictation.cancel_requested.is_set():
+    if not dictation.operation_is_current(operation_id, cancel_event):
         return None
     if return_code:
         raise subprocess.CalledProcessError(return_code, process.args)
@@ -191,12 +207,20 @@ class Dictation:
         self.transcriber = None
         self.typing_process = None
         self.pressed = False
+        self.operation_epoch = OperationEpoch()
         self.waveform_stop = threading.Event()
         self.waveform_thread = None
         self.cancel_requested = threading.Event()
+        self.cancel_cleanup_ready = threading.Event()
+        self.cancel_cleanup_ready.set()
 
     def start(self):
-        self.cancel_requested.clear()
+        if not self.cancel_cleanup_ready.wait(timeout=5):
+            raise RuntimeError('The cancelled recording is still closing; try again shortly.')
+        operation_id, cancel_event = self.operation_epoch.begin()
+        waveform_stop = threading.Event()
+        self.cancel_requested = cancel_event
+        self.waveform_stop = waveform_stop
         self.temp = tempfile.TemporaryDirectory(prefix='minimal-whisper-')
         self.wav = Path(self.temp.name) / 'recording.wav'
         logfile = LOG.open('a', encoding='utf-8')
@@ -206,24 +230,63 @@ class Dictation:
             self.recorder = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=logfile,
+                start_new_session=True,
             )
+        except Exception:
+            self.temp.cleanup()
+            self.recorder = self.wav = self.temp = None
+            raise
         finally:
             logfile.close()
+        recorder = self.recorder
+        temp = self.temp
+        wav = self.wav
         time.sleep(0.15)
-        if self.recorder.poll() is not None:
+        if not self.operation_is_current(operation_id, cancel_event):
+            if not self.cancel_cleanup_ready.wait(timeout=5):
+                self.terminate_process_tree(recorder)
+                if temp is not None:
+                    temp.cleanup()
+            self.recorder = self.wav = self.temp = None
+            return
+        if recorder.poll() is not None:
+            self.temp.cleanup()
+            self.recorder = self.wav = self.temp = None
             raise RuntimeError(f'{AudioBackend.detect().name} recorder exited before capture started; see {LOG}')
+        if not self.set_state_if_current(
+                operation_id, cancel_event, 'recording', waveform=[0.0] * 17):
+            self.terminate_process_tree(recorder)
+            if temp is not None:
+                temp.cleanup()
+            self.recorder = self.wav = self.temp = None
+            return
         self.pressed = True
-        self.waveform_stop = threading.Event()
-        set_state('recording', waveform=[0.0] * 17)
         self.waveform_thread = threading.Thread(
-            target=self.monitor_waveform, args=(self.wav,), daemon=True)
+            target=self.monitor_waveform,
+            args=(wav, waveform_stop, operation_id, cancel_event), daemon=True)
         self.waveform_thread.start()
         log(f'recording started model={MODEL}')
         notify('Recording', 'Release the shortcut to transcribe')
 
-    def monitor_waveform(self, wav):
+    def operation_is_current(self, operation_id, cancel_event):
+        return self.operation_epoch.is_current(operation_id, cancel_event)
+
+    def set_state_if_current(self, operation_id, cancel_event, state, detail=None,
+                             waveform=None):
+        changes = {}
+        if detail is not None:
+            changes['detail'] = detail
+        if waveform is not None:
+            changes['waveform'] = waveform
+        return self.operation_epoch.run_if_current(
+            operation_id, cancel_event,
+            lambda: set_state(state, **changes))
+
+    def monitor_waveform(self, wav, waveform_stop, operation_id, cancel_event):
         offset = None
-        while not self.waveform_stop.wait(0.05):
+        while not waveform_stop.wait(0.05):
+            if not self.operation_is_current(operation_id, cancel_event):
+                return
             try:
                 with wav.open('rb') as recording:
                     if offset is None:
@@ -240,49 +303,66 @@ class Dictation:
                     levels = pcm_waveform_levels(data[:usable])
                 else:
                     levels = [0.0] * 17
-                set_state('recording', waveform=levels)
+                self.set_state_if_current(
+                    operation_id, cancel_event, 'recording', waveform=levels)
             except FileNotFoundError:
                 continue
             except OSError as exc:
                 log(f'could not read live recording waveform: {exc!r}')
 
     def stop_and_transcribe(self):
+        operation_id = self.operation_epoch.current_id
+        cancel_event = self.cancel_requested
         proc, wav, temp = self.recorder, self.wav, self.temp
         self.recorder = self.wav = self.temp = None
         self.pressed = False
         if proc is None:
             return
         self.waveform_stop.set()
+        waveform_thread = self.waveform_thread
+        self.waveform_thread = None
         try:
             proc.send_signal(signal.SIGINT)
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.terminate()
             proc.wait(timeout=3)
-        if self.waveform_thread is not None:
-            self.waveform_thread.join(timeout=1)
-            self.waveform_thread = None
+        if waveform_thread is not None:
+            waveform_thread.join(timeout=1)
+        if not self.operation_is_current(operation_id, cancel_event):
+            if temp is not None:
+                temp.cleanup()
+            return
         if not wav.exists() or wav.stat().st_size < 2048:
             notify('No recording', 'No audio was captured. Check the default microphone source.')
             log('recording was empty or too short')
-            set_state('listening')
-            temp.cleanup()
+            self.set_state_if_current(operation_id, cancel_event, 'listening')
+            if temp is not None:
+                temp.cleanup()
             return
 
         notify('Transcribing', 'Speech is being transcribed locally')
-        set_state('transcribing')
+        if not self.set_state_if_current(operation_id, cancel_event, 'transcribing'):
+            if temp is not None:
+                temp.cleanup()
+            return
         try:
             transcription_model = self.verify_model_is_downloaded()
         except RuntimeError as exc:
+            if not self.operation_is_current(operation_id, cancel_event):
+                if temp is not None:
+                    temp.cleanup()
+                return
             message = str(exc)
             log(message)
-            set_state('error', message)
-            temp.cleanup()
+            self.set_state_if_current(operation_id, cancel_event, 'error', message)
+            if temp is not None:
+                temp.cleanup()
             return
-        if self.cancel_requested.is_set():
+        if not self.operation_is_current(operation_id, cancel_event):
             log('transcription cancelled before inference started')
-            set_state('listening')
-            temp.cleanup()
+            if temp is not None:
+                temp.cleanup()
             return
 
         command = [sys.executable, '-m', 'whisper', str(wav), '--model', transcription_model,
@@ -293,15 +373,17 @@ class Dictation:
             command.extend(['--language', LANGUAGE])
         try:
             with LOG.open('a', encoding='utf-8') as f:
-                self.transcriber = subprocess.Popen(
-                    command, stdin=subprocess.DEVNULL, stdout=f, stderr=f)
-                if self.cancel_requested.is_set() and self.transcriber.poll() is None:
-                    self.transcriber.terminate()
-                return_code = self.transcriber.wait()
-                self.transcriber = None
-            if self.cancel_requested.is_set():
+                transcriber = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL, stdout=f, stderr=f,
+                    start_new_session=True)
+                self.transcriber = transcriber
+                if not self.operation_is_current(operation_id, cancel_event):
+                    self.terminate_process_tree(transcriber)
+                return_code = transcriber.wait()
+                if self.transcriber is transcriber:
+                    self.transcriber = None
+            if not self.operation_is_current(operation_id, cancel_event):
                 log('transcription cancelled')
-                set_state('listening')
                 return
             output = wav.with_suffix('.txt')
             text = normalize_transcription(
@@ -311,37 +393,57 @@ class Dictation:
             if not text:
                 notify('No speech detected', 'Try again, speaking clearly into the default microphone.')
                 log('transcription completed with no text')
-                set_state('listening')
+                self.set_state_if_current(operation_id, cancel_event, 'listening')
                 return
-            if self.cancel_requested.is_set():
+            if not self.operation_is_current(operation_id, cancel_event):
                 log('transcription cancelled before text insertion')
-                set_state('listening')
                 return
-            set_state('delivering')
-            output_method = insert_transcription(text, self)
-            if output_method is None or self.cancel_requested.is_set():
+            if not self.set_state_if_current(operation_id, cancel_event, 'delivering'):
+                return
+            output_method = insert_transcription(text, self, cancel_event, operation_id)
+            if output_method is None or not self.operation_is_current(operation_id, cancel_event):
                 log('text delivery cancelled')
-                set_state('listening')
                 return
             log(f'transcription delivered via {output_method} ({len(text)} characters)')
             notify('Done', 'Transcription inserted' if 'typed' in output_method
                    else 'Transcription copied; paste it yourself')
-            set_state('listening')
+            self.set_state_if_current(operation_id, cancel_event, 'listening')
 
         except Exception as exc:
+            if not self.operation_is_current(operation_id, cancel_event):
+                log(f'cancelled operation exited: {exc!r}')
+                return
             log(f'error: {exc!r}')
             notify('Whisper error', str(exc))
-            set_state('error', str(exc))
+            self.set_state_if_current(operation_id, cancel_event, 'error', str(exc))
         finally:
-            temp.cleanup()
+            if temp is not None:
+                temp.cleanup()
             gc.collect()
-            if STATE.exists():
+            if self.operation_is_current(operation_id, cancel_event) and STATE.exists():
                 try:
                     current = json.loads(STATE.read_text(encoding='utf-8'))
-                    if current.get('state') == 'transcribing':
-                        set_state('listening')
+                    if current.get('state') in ('transcribing', 'delivering'):
+                        self.set_state_if_current(operation_id, cancel_event, 'listening')
                 except (OSError, ValueError):
-                    set_state('listening')
+                    self.set_state_if_current(operation_id, cancel_event, 'listening')
+
+    @staticmethod
+    def terminate_process_tree(process, timeout=2):
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.wait(timeout=timeout)
 
     def verify_model_is_downloaded(self):
         local_model = Path(MODEL)
@@ -373,6 +475,7 @@ class Dictation:
         return str(checkpoint)
 
     def cancel(self):
+        self.operation_epoch.cancel(self.cancel_requested)
         proc, temp = self.recorder, self.temp
         self.recorder = self.wav = self.temp = None
         self.pressed = False
@@ -411,44 +514,65 @@ class Dictation:
         log('recording cancelled during shutdown')
 
     def cancel_current(self):
-        self.cancel_requested.set()
+        self.operation_epoch.cancel(self.cancel_requested)
         self.waveform_stop.set()
         set_state('cancelling')
         proc, temp = self.recorder, self.temp
+        waveform_thread = self.waveform_thread
         if proc is not None:
             self.recorder = self.wav = self.temp = None
             self.pressed = False
-            if proc.poll() is None:
-                proc.send_signal(signal.SIGINT)
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-            if self.waveform_thread is not None:
-                self.waveform_thread.join(timeout=1)
-                self.waveform_thread = None
+            self.waveform_thread = None
+            self.cancel_cleanup_ready.clear()
+            try:
+                os.killpg(proc.pid, signal.SIGINT)
+            except OSError:
+                pass
+            threading.Thread(
+                target=self.finish_cancelled_recording,
+                args=(proc, temp, waveform_thread), daemon=True).start()
+        else:
+            self.pressed = False
+            self.waveform_thread = None
+            if waveform_thread is not None:
+                waveform_thread.join(timeout=0.2)
             if temp is not None:
                 temp.cleanup()
 
         transcriber = self.transcriber
         if transcriber is not None and transcriber.poll() is None:
-            transcriber.terminate()
             try:
-                transcriber.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                transcriber.kill()
-                transcriber.wait(timeout=2)
+                os.killpg(transcriber.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            threading.Thread(
+                target=self.terminate_process_tree, args=(transcriber,), daemon=True).start()
         typing_process = self.typing_process
         if typing_process is not None and typing_process.poll() is None:
-            typing_process.terminate()
             try:
-                typing_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                typing_process.kill()
-                typing_process.wait(timeout=2)
-        set_state('listening')
+                os.killpg(typing_process.pid, signal.SIGTERM)
+            except OSError:
+                pass
+        self.wav = self.temp = None
+        set_state('listening', 'Cancelled; recording discarded.')
         log('current recording or transcription cancelled')
+
+    def finish_cancelled_recording(self, proc, temp, waveform_thread):
+        try:
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait(timeout=2)
+            if waveform_thread is not None:
+                waveform_thread.join(timeout=1)
+            if temp is not None:
+                temp.cleanup()
+        finally:
+            self.cancel_cleanup_ready.set()
 
 
 def main():
