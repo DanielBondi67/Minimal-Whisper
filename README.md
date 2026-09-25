@@ -1,48 +1,37 @@
 # Minimal Whisper
 
-Minimal Whisper is a user-level XFCE/X11 app for offline voice typing with OpenAI Whisper.
+Offline voice typing with OpenAI Whisper. The app includes settings, model downloads, microphone selection with a live level meter, a tray menu, and an X11 push-to-talk shortcut.
 
-The repository contains the tray/settings UI, the X11 push-to-talk listener, and the user-level systemd and desktop-entry templates. The Whisper Python environment and model weights, runtime state, and personal settings are intentionally kept outside Git.
+## Support
 
-The settings app auto-saves its model, language, shortcut, theme, and UI scale. Choose 75%, 100%, 125%, or 150%; the settings window and recording indicator resize together. The compact recording overlay can be dragged; its position persists and can be reset to bottom-center from Settings.
+Supported: Arch Linux, XFCE, X11, PipeWire with WirePlumber and its PulseAudio-compatible `pactl` interface, and a user systemd session. Wayland is not supported.
 
-Available transcription models include Small (multilingual, 244M parameters), Base (multilingual), and Base English. Small must be downloaded once before first use; model files are stored in `~/.cache/whisper`.
+## Dependencies
 
-To check which model names your installed Whisper version recognizes, run:
+Arch packages: `python`, `python-pip`, `pipewire`, `pipewire-audio`, `pipewire-pulse`, `wireplumber`, `xclip`, `xdotool`, and `systemd`; `pavucontrol` is optional. Python packages: `PySide6`, `openai-whisper`, and `python-xlib` (listed in `requirements.txt`).
+
+Install the Arch dependencies, then create the app’s Python environment and install its Python packages:
 
 ```bash
-~/.local/opt/openai-whisper/bin/python -c \
-  'import whisper; print("\n".join(whisper.available_models()))'
+sudo pacman -S python python-pip pipewire pipewire-audio pipewire-pulse wireplumber xclip xdotool
+mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper"
+python -m venv "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv"
+"${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv/bin/pip" install -r requirements.txt
+./install.sh
 ```
 
-Use an exact name from that output as the `model` value. To add it to the selector, edit `config/models.json` or copy that file to `~/.config/minimal-whisper/models.json`, then add an entry with a display `label` and model identifier, for example:
+Start **Minimal Whisper** from the application finder. In Settings, choose an input device and confirm the live meter responds, choose a model, and download it while online. Hold the configured shortcut to record and release it to transcribe. `pactl`, `pw-record`, `xclip`, `xdotool`, Python with PySide6, and a Whisper/Xlib Python environment are checked by the installer.
 
-```json
-{"label": "Medium · multilingual", "model": "medium"}
+## Models and languages
+
+The model list is `config/models.json`; a user override can be placed at `${XDG_CONFIG_HOME:-$HOME/.config}/minimal-whisper/models.json`. The app only offers model IDs recognized by the installed `openai-whisper` runtime (or an existing local checkpoint path). To check canonical IDs, run:
+
+```bash
+"${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv/bin/python" -c 'import whisper; print("\n".join(whisper.available_models()))'
 ```
 
-Restart Minimal Whisper Settings to reload the list, then select the model. If the push-to-talk listener is running, saving the selection restarts it with that model. Whisper downloads the checkpoint on first transcription when it is not cached, so use the model once while online before relying on it offline. Model names that are not recognized by the installed Whisper version will fail when transcription starts.
+Use an exact returned ID in the JSON `model` field. The UI verifies cached model checksums and marks installed models with a tick; select an installed model and click **Uninstall model** to remove its cache file. **Check for new models** scans the installed Whisper package; update `openai-whisper` first to discover IDs added by a newer release. New IDs are saved to the user model list. Downloads only begin when you click **Download model**. Language options are in `config/languages.json` and can be overridden at `${XDG_CONFIG_HOME:-$HOME/.config}/minimal-whisper/languages.json`.
 
-The language selector includes Automatic, English, German, Japanese, and Russian. To add or rename choices, edit `config/languages.json` in the project. It is a JSON list of labels and Whisper language codes; keep an `auto` entry for automatic detection. You can also create `~/.config/minimal-whisper/languages.json` in the same format to customize choices without editing the project. That user file takes precedence over the bundled list. The `base.en` model only supports English, so the settings app switches the language back to English when that model is selected.
+## Remove
 
-## Runtime locations
-
-- Project source: `~/Projects/Minimal Whisper`
-- Settings: `~/.config/minimal-whisper/settings.json`
-- Example defaults: `settings.example.json` (`Meta` represents the Super key in Qt's portable shortcut format).
-- Whisper model cache: `~/.cache/whisper`
-- Language choices: `config/languages.json` (optional user override: `~/.config/minimal-whisper/languages.json`)
-- Model choices: `config/models.json` (optional user override: `~/.config/minimal-whisper/models.json`)
-- Runtime scripts in `~/.local/bin` link to `src/` in this repository.
-- User services, desktop launchers, and the icon link to the corresponding project files.
-- XFCE's systray hidden-item preference remains in `~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml` because it belongs to this desktop profile.
-
-## Install or restore links
-
-Run `./install.sh` from this directory. It updates the runtime links and user systemd units, migrates existing settings without deleting the old copies, and carries forward any services that were running.
-
-The UI uses system Python with PySide6. The listener uses the existing Whisper virtual environment at `~/.local/opt/openai-whisper`, which provides Whisper and Python-Xlib. That path and the Python package retain the engine’s name; model files and the virtual environment are not stored in this repository.
-
-## Version control
-
-Check changes with `git status` and review them with `git diff`. The initial project snapshot is committed locally; no remote repository is configured.
+Run `./uninstall.sh`. It removes Minimal Whisper’s desktop, service, icon, and command links. It preserves settings, logs, model downloads, Python environment, and project files.

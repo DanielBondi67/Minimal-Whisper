@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_bin="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+# shellcheck source=../lib/runtime.sh
+source "$project_bin/../lib/runtime.sh"
+
+python_bin="$(minimal_whisper_resolve_python)" || {
+    echo 'Minimal Whisper requires Python packages openai-whisper and python-xlib.' >&2
+    exit 1
+}
+export MINIMAL_WHISPER_PYTHON="$python_bin"
+exec "$python_bin" "$HOME/.local/bin/minimal-whisper-ptt.py" "$@"

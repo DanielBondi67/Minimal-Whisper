@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_bin="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+# shellcheck source=../lib/runtime.sh
+source "$project_bin/../lib/runtime.sh"
+
+python_bin="$(minimal_whisper_resolve_ui_python)" || {
+    echo 'Minimal Whisper requires Python 3 with PySide6.' >&2
+    exit 1
+}
+exec "$python_bin" "$HOME/.local/bin/minimal-whisper-control.py" "$@"

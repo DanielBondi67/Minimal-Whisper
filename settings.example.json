@@ -3,6 +3,7 @@
   "language": "auto",
   "theme": "dark",
   "scale_percent": 100,
+  "audio_source": "",
   "shortcut": "Meta+Ctrl+Y",
   "overlay_position": null
 }

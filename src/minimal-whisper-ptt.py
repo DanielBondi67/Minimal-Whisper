@@ -1,5 +1,6 @@
-#!/home/archbtw/.local/opt/openai-whisper/bin/python
+#!/usr/bin/env python3
 import gc
+import hashlib
 import json
 import os
 import signal
@@ -7,18 +8,24 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 from Xlib import X, XK, display, error
 
-CONFIG = Path.home() / '.config/minimal-whisper/settings.json'
-LEGACY_CONFIG = Path.home() / '.config/openai-whisper/settings.json'
-STATE = Path.home() / '.local/state/minimal-whisper/status.json'
-MODEL_CONFIG = Path.home() / '.config/minimal-whisper/models.json'
-LEGACY_MODEL_CONFIG = Path.home() / '.config/openai-whisper/models.json'
+HOME = Path.home()
+CONFIG_HOME = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config'))
+STATE_HOME = Path(os.environ.get('XDG_STATE_HOME', HOME / '.local/state'))
+CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache'))
+CONFIG = CONFIG_HOME / 'minimal-whisper/settings.json'
+LEGACY_CONFIG = CONFIG_HOME / 'openai-whisper/settings.json'
+STATE = STATE_HOME / 'minimal-whisper/status.json'
+MODEL_CONFIG = CONFIG_HOME / 'minimal-whisper/models.json'
+LEGACY_MODEL_CONFIG = CONFIG_HOME / 'openai-whisper/models.json'
 BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
-            'shortcut': 'Meta+Ctrl+Y', 'scale_percent': 100}
+            'shortcut': 'Meta+Ctrl+Y', 'scale_percent': 100,
+            'audio_source': ''}
 
 
 def load_settings():
@@ -47,9 +54,23 @@ SETTINGS = load_settings()
 MODEL = SETTINGS['model']
 LANGUAGE = SETTINGS['language']
 AVAILABLE_MODELS = load_models()
-PYTHON = Path.home() / '.local/opt/openai-whisper/bin/whisper'
-CACHE = Path.home() / '.cache/whisper'
-LOG = Path.home() / '.local/state/minimal-whisper/ptt.log'
+CACHE = CACHE_HOME / 'whisper'
+LOG = STATE_HOME / 'minimal-whisper/ptt.log'
+MODEL_METADATA_SCRIPT = '''
+import json, os, urllib.parse, whisper
+print(json.dumps({name: {'file': os.path.basename(urllib.parse.urlsplit(url).path),
+                         'sha256': url.rstrip('/').split('/')[-2]}
+                  for name, url in whisper._MODELS.items()}))
+'''
+
+
+def load_model_metadata():
+    try:
+        result = subprocess.run([sys.executable, '-c', MODEL_METADATA_SCRIPT],
+                                capture_output=True, text=True, timeout=30, check=True)
+        return json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise RuntimeError(f'Could not read the installed Whisper model catalog: {exc}') from exc
 
 
 def log(message):
@@ -102,7 +123,9 @@ def shortcut_parts(sequence, dpy):
 
 
 class Dictation:
-    def __init__(self):
+    def __init__(self, model_metadata=None):
+        self.model_metadata = model_metadata
+        self.verified_checkpoint = None
         self.temp = None
         self.wav = None
         self.recorder = None
@@ -113,15 +136,20 @@ class Dictation:
         self.wav = Path(self.temp.name) / 'recording.wav'
         logfile = LOG.open('a', encoding='utf-8')
         try:
+            command = ['pw-record']
+            source = SETTINGS.get('audio_source')
+            if source:
+                command.extend(['--target', source])
+            command.extend(['--rate', '16000', '--channels', '1', '--format', 's16', str(self.wav)])
             self.recorder = subprocess.Popen(
-                ['pw-record', '--rate', '16000', '--channels', '1', '--format', 's16', str(self.wav)],
+                command,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=logfile,
             )
         finally:
             logfile.close()
         time.sleep(0.15)
         if self.recorder.poll() is not None:
-            raise RuntimeError('pw-record exited before capture started; see ~/.local/state/minimal-whisper/ptt.log')
+            raise RuntimeError(f'pw-record exited before capture started; see {LOG}')
         self.pressed = True
         set_state('recording')
         log(f'recording started model={MODEL}')
@@ -147,7 +175,17 @@ class Dictation:
 
         notify('Transcribing', 'Speech is being transcribed locally')
         set_state('transcribing')
-        command = [str(PYTHON), str(wav), '--model', MODEL, '--model_dir', str(CACHE),
+        try:
+            transcription_model = self.verify_model_is_downloaded()
+        except RuntimeError as exc:
+            message = str(exc)
+            log(message)
+            set_state('error', message)
+            temp.cleanup()
+            return
+
+        command = [sys.executable, '-m', 'whisper', str(wav), '--model', transcription_model,
+                   '--model_dir', str(CACHE),
                    '--device', 'cpu', '--fp16', 'False', '--verbose', 'False',
                    '--output_format', 'txt', '--output_dir', temp.name]
         if LANGUAGE and LANGUAGE != 'auto':
@@ -159,7 +197,7 @@ class Dictation:
             output = wav.with_suffix('.txt')
             text = output.read_text(encoding='utf-8').strip() if output.exists() else ''
             if result.returncode != 0:
-                raise RuntimeError(f'Whisper exited with status {result.returncode}; see ~/.local/state/minimal-whisper/ptt.log')
+                raise RuntimeError(f'Whisper exited with status {result.returncode}; see {LOG}')
             if not text:
                 notify('No speech detected', 'Try again, speaking clearly into the default microphone.')
                 log('transcription completed with no text')
@@ -171,6 +209,7 @@ class Dictation:
             log(f'transcription pasted ({len(text)} characters)')
             notify('Done', 'Transcription pasted')
             set_state('listening')
+
         except Exception as exc:
             log(f'error: {exc!r}')
             notify('Whisper error', str(exc))
@@ -185,6 +224,35 @@ class Dictation:
                         set_state('listening')
                 except (OSError, ValueError):
                     set_state('listening')
+
+    def verify_model_is_downloaded(self):
+        local_model = Path(MODEL)
+        if local_model.is_absolute():
+            if not local_model.is_file() or local_model.stat().st_size == 0:
+                raise RuntimeError(f'Local model file is missing or empty: {local_model}')
+            return str(local_model)
+        if self.model_metadata is None:
+            self.model_metadata = load_model_metadata()
+        info = self.model_metadata.get(MODEL)
+        if not info:
+            raise RuntimeError(f'Model {MODEL!r} is not supported by the installed Whisper runtime.')
+        checkpoint = CACHE / info['file']
+        if not checkpoint.is_file():
+            raise RuntimeError(
+                f'Model {MODEL!r} is not downloaded. Open Settings and click Download model first.')
+        stat = checkpoint.stat()
+        signature = (str(checkpoint), stat.st_size, stat.st_mtime_ns)
+        if signature == self.verified_checkpoint:
+            return str(checkpoint)
+        digest = hashlib.sha256()
+        with checkpoint.open('rb') as model_file:
+            for chunk in iter(lambda: model_file.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+        if digest.hexdigest() != info['sha256']:
+            raise RuntimeError(
+                f'Model {MODEL!r} is incomplete or corrupt. Use Download model in Settings to retry.')
+        self.verified_checkpoint = signature
+        return str(checkpoint)
 
     def cancel(self):
         proc, temp = self.recorder, self.temp
@@ -204,8 +272,11 @@ class Dictation:
 
 
 def main():
+    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+        print('Minimal Whisper supports X11 only; Wayland is not supported.', file=sys.stderr)
+        return 2
     if MODEL not in AVAILABLE_MODELS:
-        print(f'Model {MODEL!r} is not listed in ~/.config/minimal-whisper/models.json or config/models.json',
+        print(f'Model {MODEL!r} is not listed in {MODEL_CONFIG} or config/models.json',
               file=sys.stderr)
         return 2
     dpy = display.Display()

@@ -1,36 +1,43 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 import json
 import math
 import os
+import re
+import shutil
+import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QPointF
+from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QPointF, QProcess, QUrl
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QLocalServer, QLocalSocket, QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QKeySequenceEdit, QMainWindow, QMenu, QPushButton, QSystemTrayIcon,
-    QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QVBoxLayout, QWidget,
 )
 
 HOME = Path.home()
-SETTINGS = HOME / '.config/minimal-whisper/settings.json'
-LEGACY_SETTINGS = HOME / '.config/openai-whisper/settings.json'
-STATE = HOME / '.local/state/minimal-whisper/status.json'
-LEGACY_STATE = HOME / '.local/state/openai-whisper/status.json'
-LANGUAGE_CONFIG = HOME / '.config/minimal-whisper/languages.json'
-LEGACY_LANGUAGE_CONFIG = HOME / '.config/openai-whisper/languages.json'
+CONFIG_HOME = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config'))
+DATA_HOME = Path(os.environ.get('XDG_DATA_HOME', HOME / '.local/share'))
+STATE_HOME = Path(os.environ.get('XDG_STATE_HOME', HOME / '.local/state'))
+CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache'))
+SETTINGS = CONFIG_HOME / 'minimal-whisper/settings.json'
+LEGACY_SETTINGS = CONFIG_HOME / 'openai-whisper/settings.json'
+STATE = STATE_HOME / 'minimal-whisper/status.json'
+LEGACY_STATE = STATE_HOME / 'openai-whisper/status.json'
+LANGUAGE_CONFIG = CONFIG_HOME / 'minimal-whisper/languages.json'
+LEGACY_LANGUAGE_CONFIG = CONFIG_HOME / 'openai-whisper/languages.json'
 BUILTIN_LANGUAGE_CONFIG = Path(__file__).resolve().parent.parent / 'config/languages.json'
-MODEL_CONFIG = HOME / '.config/minimal-whisper/models.json'
-LEGACY_MODEL_CONFIG = HOME / '.config/openai-whisper/models.json'
+MODEL_CONFIG = CONFIG_HOME / 'minimal-whisper/models.json'
+LEGACY_MODEL_CONFIG = CONFIG_HOME / 'openai-whisper/models.json'
 BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
 SERVICE = 'minimal-whisper-ptt.service'
 DEFAULTS = {'model': 'base', 'language': 'auto', 'theme': 'dark',
             'shortcut': 'Meta+Ctrl+Y', 'overlay_position': None,
-            'scale_percent': 100}
+            'scale_percent': 100, 'audio_source': ''}
 SCALE_PRESETS = (75, 100, 125, 150)
 
 
@@ -99,6 +106,95 @@ def read_models():
             ('Base · multilingual', 'base'), ('Base English · faster', 'base.en')]
 
 
+WHISPER_METADATA_SCRIPT = '''
+import json, os, urllib.parse, whisper
+models = {}
+for name in whisper.available_models():
+    url = whisper._MODELS[name]
+    models[name] = {'file': os.path.basename(urllib.parse.urlsplit(url).path),
+                    'url': url, 'sha256': url.rstrip('/').split('/')[-2]}
+print(json.dumps(models))
+'''
+
+MODEL_CACHE_CHECK_SCRIPT = '''
+import hashlib, json, os, sys, whisper
+root = sys.argv[1]
+valid = set()
+checked = {}
+for name, url in whisper._MODELS.items():
+    filename = os.path.basename(url.split('?')[0])
+    path = os.path.join(root, filename)
+    if path not in checked:
+        if not os.path.isfile(path):
+            checked[path] = False
+        else:
+            digest = hashlib.sha256()
+            with open(path, 'rb') as model:
+                for chunk in iter(lambda: model.read(8 * 1024 * 1024), b''):
+                    digest.update(chunk)
+            checked[path] = digest.hexdigest() == url.rstrip('/').split('/')[-2]
+    if checked[path]:
+        valid.add(name)
+print(json.dumps(sorted(valid)))
+'''
+
+
+def whisper_python_candidates():
+    candidates = []
+    if os.environ.get('MINIMAL_WHISPER_PYTHON'):
+        candidates.append(os.environ['MINIMAL_WHISPER_PYTHON'])
+    candidates.extend((DATA_HOME / 'minimal-whisper/venv/bin/python',
+                       HOME / '.local/opt/openai-whisper/bin/python'))
+    if shutil.which('python3'):
+        candidates.append(shutil.which('python3'))
+    candidates.append(sys.executable)
+    seen = set()
+    for candidate in candidates:
+        candidate = str(candidate)
+        if candidate not in seen and Path(candidate).is_file():
+            seen.add(candidate)
+            yield candidate
+
+
+def load_whisper_metadata():
+    for candidate in whisper_python_candidates():
+        try:
+            result = subprocess.run([candidate, '-c', WHISPER_METADATA_SCRIPT],
+                                    capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode == 0:
+                return candidate, json.loads(result.stdout), ''
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
+    return None, {}, 'Whisper is unavailable in the configured Python environments.'
+
+
+def human_size(size):
+    value = float(size)
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if value < 1024 or unit == 'GB':
+            return f'{value:.0f} {unit}' if unit == 'B' else f'{value:.1f} {unit}'
+        value /= 1024
+    return f'{value:.1f} GB'
+
+
+def read_audio_sources():
+    try:
+        default = subprocess.run(['pactl', 'get-default-source'], capture_output=True,
+                                 text=True, timeout=3, check=True).stdout.strip()
+        output = subprocess.run(['pactl', 'list', 'sources'], capture_output=True,
+                                text=True, timeout=3, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return '', []
+    devices = []
+    for block in re.split(r'(?m)^Source #\d+\s*$', output)[1:]:
+        name = re.search(r'(?m)^\s*Name:\s*(.+?)\s*$', block)
+        description = re.search(r'(?m)^\s*Description:\s*(.+?)\s*$', block)
+        if name and not name.group(1).endswith('.monitor'):
+            devices.append((description.group(1) if description else name.group(1),
+                            name.group(1)))
+    return default, devices
+
+
 def write_settings(data):
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     temp = SETTINGS.with_suffix('.tmp')
@@ -129,9 +225,17 @@ def service_state():
         return 'unknown'
 
 
-def service_action(action):
+def service_running():
+    return service_state() in {'active', 'activating', 'reloading', 'deactivating'}
+
+
+def service_action(action, background=False):
     try:
-        return subprocess.run(['systemctl', '--user', action, SERVICE],
+        command = ['systemctl', '--user']
+        if background:
+            command.append('--no-block')
+        command.extend((action, SERVICE))
+        return subprocess.run(command,
                               capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return exc
@@ -343,6 +447,8 @@ class MainWindow(QMainWindow):
         self.settings = read_json(SETTINGS, DEFAULTS)
         self.settings['scale_percent'] = normalized_scale(
             self.settings.get('scale_percent', 100))
+        self.whisper_python, self.whisper_model_info, self.whisper_error = load_whisper_metadata()
+        self.invalid_model_ids = []
         self.setWindowTitle('Minimal Whisper Settings')
         self.setWindowIcon(make_icon(self.settings['theme']))
         self.build_ui()
@@ -377,10 +483,38 @@ class MainWindow(QMainWindow):
         form = QFormLayout(card)
         self.form_layout = form
         self.model = QComboBox()
-        self.models = read_models()
+        self.all_models = read_models()
+        self.models = [(label, model_id) for label, model_id in self.all_models
+                       if model_id in self.whisper_model_info
+                       or (Path(model_id).is_absolute() and Path(model_id).is_file())]
+        valid_ids = {model_id for _label, model_id in self.models}
+        self.invalid_model_ids = [model_id for _label, model_id in self.all_models
+                                  if model_id not in valid_ids]
         for label, model_id in self.models:
             self.model.addItem(label, model_id)
+        self.model.setEnabled(bool(self.models))
         self.model.setCurrentIndex(max(0, self.model.findData(self.settings['model'])))
+        self.check_models_button = QPushButton('Check for new models')
+        self.model_status = QLabel()
+        self.model_status.setObjectName('muted')
+        self.model_status.setWordWrap(True)
+        self.model_catalog_status = QLabel()
+        self.model_catalog_status.setObjectName('muted')
+        self.model_catalog_status.setWordWrap(True)
+        model_files_row = QWidget()
+        model_files_layout = QVBoxLayout(model_files_row)
+        model_files_layout.setContentsMargins(0, 0, 0, 0)
+        model_files_layout.setSpacing(6)
+        self.model_download_button = QPushButton('Download model')
+        self.model_download_progress = QProgressBar()
+        self.model_download_progress.setRange(0, 100)
+        self.model_download_progress.hide()
+        model_download_row = QHBoxLayout()
+        model_download_row.addWidget(self.model_download_button)
+        model_download_row.addWidget(self.model_download_progress, 1)
+        model_files_layout.addWidget(self.model_status)
+        model_files_layout.addWidget(self.model_catalog_status)
+        model_files_layout.addLayout(model_download_row)
         self.language = QComboBox()
         self.languages = read_languages()
         for label, code in self.languages:
@@ -391,12 +525,31 @@ class MainWindow(QMainWindow):
         self.shortcut.setKeySequence(QKeySequence.fromString(
             self.settings['shortcut'], QKeySequence.SequenceFormat.PortableText))
         self.shortcut.setToolTip('Press the keys you want to use. Meta is the Super key on Linux.')
+        self.audio_source = QComboBox()
+        self.audio_refresh = QPushButton('Refresh')
+        audio_row = QWidget()
+        audio_layout = QHBoxLayout(audio_row)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(8)
+        audio_layout.addWidget(self.audio_source, 1)
+        audio_layout.addWidget(self.audio_refresh)
         self.theme_toggle = QPushButton()
         self.theme_toggle.setObjectName('themeToggle')
         self.theme_toggle.setCheckable(True)
         self.theme_toggle.setChecked(self.settings['theme'] == 'dark')
         self.update_theme_button()
         form.addRow('Model', self.model)
+        form.addRow('', self.check_models_button)
+        form.addRow('Model files', model_files_row)
+        form.addRow('Microphone', audio_row)
+        self.audio_level = QProgressBar()
+        self.audio_level.setRange(0, 100)
+        self.audio_level.setValue(0)
+        self.audio_level.setFormat('%p%')
+        self.audio_level_text = QLabel('Meter starts while Settings is open')
+        self.audio_level_text.setObjectName('muted')
+        form.addRow('Input level', self.audio_level)
+        form.addRow('', self.audio_level_text)
         form.addRow('Language', self.language)
         form.addRow('Shortcut', self.shortcut)
         form.addRow('Theme', self.theme_toggle)
@@ -423,20 +576,403 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.message)
 
         buttons = QHBoxLayout()
-        self.toggle = QPushButton('Stop Whisper' if service_state() == 'active' else 'Start Whisper')
+        self.toggle = QPushButton('Stop Whisper' if service_running() else 'Start Whisper')
         self.toggle.setObjectName('secondary')
         buttons.addWidget(self.toggle)
         buttons.addStretch(1)
         layout.addLayout(buttons)
         self.setCentralWidget(root)
         self.toggle.clicked.connect(self.toggle_service)
+        self.check_models_button.clicked.connect(self.check_for_new_models)
         self.shortcut.keySequenceChanged.connect(lambda _sequence: self.update_hotkey_hint())
-        self.model.currentIndexChanged.connect(lambda _index: self.schedule_save())
+        self.model.currentIndexChanged.connect(self.model_changed)
         self.language.currentIndexChanged.connect(lambda _index: self.schedule_save())
         self.scale_selector.currentIndexChanged.connect(self.scale_changed)
+        self.audio_source.currentIndexChanged.connect(self.audio_source_changed)
+        self.audio_refresh.clicked.connect(self.refresh_audio_sources)
         self.shortcut.keySequenceChanged.connect(self.shortcut_changed)
         self.theme_toggle.clicked.connect(self.toggle_theme)
         self.reset_overlay.clicked.connect(self.app.reset_overlay_position)
+        self.model_download_button.clicked.connect(self.download_selected_model)
+        self.model_download_process = QProcess(self)
+        self.model_download_process.readyReadStandardError.connect(self.model_download_output)
+        self.model_download_process.finished.connect(self.model_download_finished)
+        self.model_cache_check_process = QProcess(self)
+        self.model_cache_check_process.finished.connect(self.model_cache_check_finished)
+        self.model_catalog_process = QProcess(self)
+        self.model_catalog_process.finished.connect(self.model_catalog_check_finished)
+        self.model_network = QNetworkAccessManager(self)
+        self.model_remote_sizes = {}
+        self.model_size_checked = set()
+        self.verified_models = set()
+        self.model_cache_checking = False
+        self.model_cache_rescan_requested = False
+        self.downloading_model = None
+        self.resume_listener_after_model_change = False
+        self.resume_from_model = None
+        self.audio_meter_process = QProcess(self)
+        self.audio_meter_process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self.audio_meter_process.readyReadStandardOutput.connect(self.read_audio_meter)
+        self.audio_meter_process.errorOccurred.connect(self.audio_meter_error)
+        self.audio_meter_buffer = bytearray()
+        self.refresh_audio_sources()
+        self.refresh_model_cache()
+        self.update_model_status()
+
+    @staticmethod
+    def model_download_script():
+        return ('import sys, whisper; '
+                'whisper._download(whisper._MODELS[sys.argv[1]], sys.argv[2], in_memory=False)')
+
+    def model_changed(self, _index):
+        self.update_model_marks()
+        self.update_model_status()
+        self.update_service_controls(service_running())
+        self.schedule_save()
+
+    def selected_model_is_downloading(self):
+        return (self.model_download_process.state() != QProcess.ProcessState.NotRunning
+                and self.model.currentData() == self.downloading_model)
+
+    def update_service_controls(self, running):
+        blocked = self.selected_model_is_downloading()
+        self.toggle.setEnabled(not blocked)
+        self.toggle.setText('Model downloading' if blocked else
+                            ('Stop Whisper' if running else 'Start Whisper'))
+
+    @staticmethod
+    def model_label(model_id):
+        if model_id.endswith('.en'):
+            return f'{model_id[:-3].title()} · English'
+        return f'{model_id.replace("-", " ").title()} · multilingual'
+
+    def update_model_marks(self):
+        selected = self.model.currentData()
+        self.model.blockSignals(True)
+        for index, (label, model_id) in enumerate(self.models):
+            installed = (model_id in self.verified_models or
+                         (Path(model_id).is_absolute() and Path(model_id).is_file()))
+            self.model.setItemText(index, f'✓  {label}' if installed else label)
+        self.model.setCurrentIndex(max(0, self.model.findData(selected)))
+        self.model.blockSignals(False)
+
+    def refresh_model_cache(self):
+        if not self.whisper_python:
+            self.verified_models = set()
+            self.model_catalog_status.setText(self.whisper_error)
+            return
+        if self.model_cache_check_process.state() != QProcess.ProcessState.NotRunning:
+            self.model_cache_rescan_requested = True
+            return
+        self.model_cache_rescan_requested = False
+        self.model_cache_checking = True
+        self.model_catalog_status.setText('Checking downloaded model files…')
+        self.model_download_button.setEnabled(False)
+        self.model_cache_check_process.start(
+            self.whisper_python,
+            ['-c', MODEL_CACHE_CHECK_SCRIPT, str(CACHE_HOME / 'whisper')])
+
+    def model_cache_check_finished(self, exit_code, _exit_status):
+        self.model_cache_checking = False
+        output = bytes(self.model_cache_check_process.readAllStandardOutput())
+        if exit_code == 0:
+            try:
+                self.verified_models = set(json.loads(output.decode('utf-8')))
+                self.model_catalog_status.setText(
+                    f'{len(self.verified_models)} verified model(s) downloaded.')
+            except (ValueError, UnicodeDecodeError):
+                self.verified_models = set()
+                self.model_catalog_status.setText('Could not read model cache status.')
+        else:
+            self.verified_models = set()
+            self.model_catalog_status.setText('Could not verify downloaded model files.')
+        self.update_model_marks()
+        self.update_model_status()
+        if self.model_cache_rescan_requested:
+            QTimer.singleShot(100, self.refresh_model_cache)
+
+    def check_for_new_models(self):
+        if not self.whisper_python:
+            self.model_catalog_status.setText(self.whisper_error)
+            return
+        if self.model_catalog_process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self.check_models_button.setEnabled(False)
+        self.check_models_button.setText('Checking…')
+        self.model_catalog_status.setText('Checking models supported by installed OpenAI Whisper…')
+        self.model_catalog_process.start(self.whisper_python, ['-c', WHISPER_METADATA_SCRIPT])
+
+    def model_catalog_check_finished(self, exit_code, _exit_status):
+        self.check_models_button.setEnabled(True)
+        self.check_models_button.setText('Check for new models')
+        output = bytes(self.model_catalog_process.readAllStandardOutput())
+        if exit_code != 0:
+            self.model_catalog_status.setText('Could not check the installed Whisper model catalog.')
+            return
+        try:
+            metadata = json.loads(output.decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            self.model_catalog_status.setText('Could not read the installed Whisper model catalog.')
+            return
+        self.whisper_model_info = metadata
+        configured = {model_id for _label, model_id in self.all_models}
+        new_models = [(self.model_label(model_id), model_id)
+                      for model_id in metadata if model_id not in configured]
+        if new_models:
+            self.all_models.extend(new_models)
+            MODEL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            temporary = MODEL_CONFIG.with_suffix('.tmp')
+            temporary.write_text(json.dumps(
+                [{'label': label, 'model': model_id} for label, model_id in self.all_models],
+                indent=2) + '\n', encoding='utf-8')
+            temporary.replace(MODEL_CONFIG)
+            selected = self.model.currentData()
+            self.models.extend(new_models)
+            self.model.blockSignals(True)
+            for label, model_id in new_models:
+                self.model.addItem(label, model_id)
+            self.model.setCurrentIndex(max(0, self.model.findData(selected)))
+            self.model.blockSignals(False)
+            self.model_catalog_status.setText(
+                'Added to your model list: ' + ', '.join(model_id for _, model_id in new_models))
+        else:
+            self.model_catalog_status.setText(
+                'No new model IDs found. Update openai-whisper to check a newer catalog.')
+        self.refresh_model_cache()
+        self.update_model_status()
+
+    def update_model_status(self):
+        model_id = self.model.currentData()
+        download_running = self.model_download_process.state() != QProcess.ProcessState.NotRunning
+        downloading_selected = download_running and model_id == self.downloading_model
+        self.model_download_button.setText(
+            'Cancel download' if downloading_selected else 'Download model')
+        self.model_download_button.setEnabled(downloading_selected)
+        if not model_id:
+            self.model_status.setText(self.whisper_error or 'No valid models are configured.')
+            return
+        if model_id in self.whisper_model_info:
+            model_info = self.whisper_model_info[model_id]
+            checkpoint = CACHE_HOME / 'whisper' / model_info['file']
+            if model_id in self.verified_models:
+                self.model_status.setText(f'Installed · {human_size(checkpoint.stat().st_size)}')
+                self.model_download_button.setText('Uninstall model')
+                self.model_download_button.setEnabled(
+                    not self.model_cache_checking and not downloading_selected
+                    and read_json(STATE, {'state': 'stopped'}).get('state') != 'transcribing')
+            else:
+                size = self.model_remote_sizes.get(model_id)
+                size_text = human_size(size) if size else 'checking download size…'
+                status = 'Downloading…' if downloading_selected else 'Not installed'
+                if checkpoint.is_file() and checkpoint.stat().st_size > 0:
+                    if not downloading_selected:
+                        status = f'Incomplete or invalid download ({human_size(checkpoint.stat().st_size)})'
+                self.model_status.setText(
+                    f'{status}' if downloading_selected else f'{status} · download size {size_text}')
+                self.model_download_button.setEnabled(
+                    downloading_selected or (not self.model_cache_checking and not download_running))
+                if model_id not in self.model_size_checked:
+                    self.request_model_size(model_id, model_info['url'])
+        else:
+            checkpoint = Path(model_id)
+            self.model_download_button.setText('Managed cache only')
+            self.model_download_button.setEnabled(False)
+            self.model_status.setText(
+                f'Installed local model · {human_size(checkpoint.stat().st_size)}'
+                if checkpoint.is_file() else self.whisper_error)
+        warnings = []
+        if self.settings.get('model') not in {configured for _, configured in self.models}:
+            warnings.append('The saved model is unavailable; choose a listed model.')
+        if self.invalid_model_ids:
+            warnings.append('Ignored unknown model IDs: ' + ', '.join(self.invalid_model_ids))
+        if warnings:
+            self.model_status.setText(self.model_status.text() + '\n' + ' '.join(warnings))
+
+    def request_model_size(self, model_id, url):
+        self.model_size_checked.add(model_id)
+        request = QNetworkRequest(QUrl(url))
+        request.setTransferTimeout(8000)
+        reply = self.model_network.head(request)
+        reply.finished.connect(lambda model_id=model_id, reply=reply:
+                               self.model_size_finished(model_id, reply))
+
+    def model_size_finished(self, model_id, reply):
+        try:
+            size = reply.header(QNetworkRequest.KnownHeaders.ContentLengthHeader)
+            if size:
+                self.model_remote_sizes[model_id] = int(size)
+        except (TypeError, ValueError):
+            pass
+        reply.deleteLater()
+        if self.model.currentData() == model_id:
+            self.update_model_status()
+
+    def download_selected_model(self):
+        if self.model_download_process.state() != QProcess.ProcessState.NotRunning:
+            if self.model.currentData() != self.downloading_model:
+                return
+            self.model_download_button.setText('Cancelling…')
+            self.model_download_button.setEnabled(False)
+            self.model_download_process.terminate()
+            return
+        model_id = self.model.currentData()
+        if model_id in self.verified_models:
+            self.uninstall_selected_model()
+            return
+        info = self.whisper_model_info.get(model_id)
+        if not self.whisper_python or not info:
+            self.model_status.setText('This model cannot be downloaded by the installed Whisper version.')
+            return
+        self.downloading_model = model_id
+        self.resume_listener_after_model_change = service_running()
+        self.resume_from_model = model_id if self.resume_listener_after_model_change else None
+        if self.resume_listener_after_model_change:
+            service_action('stop', background=True)
+        self.model_download_progress.setValue(0)
+        self.model_download_progress.show()
+        self.model_download_button.setText('Cancel download')
+        self.model_download_button.setEnabled(True)
+        self.model_status.setText('Downloading…')
+        cache = CACHE_HOME / 'whisper'
+        cache.mkdir(parents=True, exist_ok=True)
+        self.model_download_process.start(
+            self.whisper_python,
+            ['-c', self.model_download_script(), model_id, str(cache)])
+        self.update_service_controls(False)
+
+    def uninstall_selected_model(self):
+        model_id = self.model.currentData()
+        info = self.whisper_model_info.get(model_id)
+        if not info or model_id not in self.verified_models:
+            return
+        if read_json(STATE, {'state': 'stopped'}).get('state') == 'transcribing':
+            self.model_status.setText('Wait until transcription finishes before uninstalling this model.')
+            return
+        checkpoint = CACHE_HOME / 'whisper' / info['file']
+        answer = QMessageBox.question(
+            self, 'Uninstall model',
+            f'Remove {model_id} ({human_size(checkpoint.stat().st_size)}) from the local model cache?')
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if service_running():
+            self.resume_listener_after_model_change = True
+            self.resume_from_model = model_id
+            service_action('stop', background=True)
+        try:
+            checkpoint.unlink()
+        except OSError as exc:
+            self.model_status.setText(f'Could not uninstall model: {exc}')
+            return
+        shared_file_models = {name for name, data in self.whisper_model_info.items()
+                              if data['file'] == info['file']}
+        self.verified_models.difference_update(shared_file_models)
+        self.update_model_marks()
+        self.model_catalog_status.setText(f'Removed {model_id} from the local model cache.')
+        self.update_model_status()
+        self.update_service_controls(False)
+
+    def model_download_output(self):
+        output = bytes(self.model_download_process.readAllStandardError()).decode(
+            'utf-8', errors='replace')
+        percentages = re.findall(r'(\d{1,3})%', output)
+        if percentages:
+            self.model_download_progress.setValue(min(100, int(percentages[-1])))
+            self.model_catalog_status.setText(
+                f'Downloading {self.downloading_model}… {percentages[-1]}%')
+            if self.model.currentData() == self.downloading_model:
+                self.model_status.setText(f'Downloading… {percentages[-1]}%')
+
+    def model_download_finished(self, exit_code, _exit_status):
+        model_id = self.downloading_model
+        self.downloading_model = None
+        self.model_download_progress.hide()
+        if exit_code == 0:
+            self.model_catalog_status.setText(f'Downloaded {model_id}; verifying checkpoint…')
+            self.refresh_model_cache()
+        else:
+            self.model_catalog_status.setText(
+                f'Download of {model_id} was cancelled or failed; it is not available yet.')
+        self.update_model_status()
+        self.update_service_controls(service_running())
+
+    def refresh_audio_sources(self):
+        selected = self.audio_source.currentData()
+        if selected is None:
+            selected = self.settings.get('audio_source', '')
+        default, devices = read_audio_sources()
+        self.audio_source.blockSignals(True)
+        self.audio_source.clear()
+        self.audio_source.addItem('System default' + (' · current default' if default else ''), '')
+        for description, source_name in devices:
+            label = description + (' · default' if source_name == default else '')
+            self.audio_source.addItem(label, source_name)
+        selected_index = self.audio_source.findData(selected)
+        if selected and selected_index < 0:
+            self.audio_source.addItem(f'Unavailable · {selected}', selected)
+            selected_index = self.audio_source.count() - 1
+        self.audio_source.setCurrentIndex(max(0, selected_index))
+        self.audio_source.blockSignals(False)
+        if not devices:
+            self.audio_level_text.setText('No microphone sources found; check PipeWire and pactl.')
+        elif self.audio_meter_process.state() == QProcess.ProcessState.NotRunning:
+            self.audio_level_text.setText('Live level appears while Settings is open.')
+
+    def audio_source_changed(self, _index):
+        source = self.audio_source.currentData() or ''
+        self.settings['audio_source'] = source
+        self.app.settings['audio_source'] = source
+        self.schedule_save()
+        if self.isVisible():
+            self.start_audio_meter()
+
+    def start_audio_meter(self):
+        if self.audio_meter_process.state() != QProcess.ProcessState.NotRunning:
+            self.audio_meter_process.terminate()
+            self.audio_meter_process.waitForFinished(500)
+        source = self.audio_source.currentData()
+        command = []
+        if source:
+            command.extend(['--target', str(source)])
+        command.extend(['--rate', '16000', '--channels', '1', '--format', 's16', '--raw', '-'])
+        self.audio_meter_buffer.clear()
+        self.audio_level.setValue(0)
+        self.audio_level_text.setText('Listening for microphone level…')
+        self.audio_meter_process.start('pw-record', command)
+
+    def stop_audio_meter(self):
+        if self.audio_meter_process.state() != QProcess.ProcessState.NotRunning:
+            self.audio_meter_process.terminate()
+            if not self.audio_meter_process.waitForFinished(1000):
+                self.audio_meter_process.kill()
+                self.audio_meter_process.waitForFinished(500)
+        self.audio_level.setValue(0)
+        self.audio_level_text.setText('Meter starts while Settings is open.')
+
+    def read_audio_meter(self):
+        self.audio_meter_buffer.extend(bytes(self.audio_meter_process.readAllStandardOutput()))
+        usable = len(self.audio_meter_buffer) & ~1
+        if usable < 64:
+            return
+        data = bytes(self.audio_meter_buffer[:usable])
+        del self.audio_meter_buffer[:usable]
+        count = usable // 2
+        samples = struct.unpack('<' + 'h' * count, data)
+        rms = math.sqrt(sum(sample * sample for sample in samples) / count) / 32768
+        decibels = 20 * math.log10(max(rms, 0.000001))
+        self.audio_level.setValue(max(0, min(100, round((decibels + 60) * 100 / 60))))
+
+    def audio_meter_error(self, _error):
+        if self.isVisible():
+            self.audio_level_text.setText(
+                'Microphone meter unavailable. Check PipeWire and the selected input source.')
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.start_audio_meter()
+
+    def hideEvent(self, event):
+        self.stop_audio_meter()
+        super().hideEvent(event)
 
     def update_theme_button(self):
         self.theme_toggle.setText('Dark · click to switch' if self.theme_toggle.isChecked()
@@ -504,6 +1040,7 @@ class MainWindow(QMainWindow):
             'language': selected_language,
             'theme': 'dark' if self.theme_toggle.isChecked() else 'light',
             'scale_percent': self.scale_selector.currentData(),
+            'audio_source': self.audio_source.currentData() or '',
             'shortcut': shortcut,
             'overlay_position': self.app.settings.get('overlay_position'),
         }
@@ -522,6 +1059,8 @@ class MainWindow(QMainWindow):
             QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(190)}px; }}
             QComboBox QAbstractItemView {{ background: {c['panel']}; selection-background-color: {c['accent']}; selection-color: {c['accent_text']}; }}
             QKeySequenceEdit {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(7)}px {px(9)}px; min-width: {px(190)}px; }}
+            QProgressBar {{ border: 1px solid {c['line']}; border-radius: {px(5)}px; padding: {px(1)}px; height: {px(14)}px; background: {c['raised']}; text-align: center; }}
+            QProgressBar::chunk {{ background: {c['accent']}; border-radius: {px(4)}px; }}
             QLabel#hotkey {{ color: {c['muted']}; padding: {px(4)}px {px(2)}px; }}
             QPushButton {{ border: 1px solid {c['line']}; border-radius: {px(9)}px; padding: {px(10)}px {px(14)}px; font-weight: 600; }}
             QPushButton#primary {{ background: {c['accent']}; color: {c['accent_text']}; border-color: {c['accent']}; }}
@@ -543,22 +1082,47 @@ class MainWindow(QMainWindow):
         self.app.settings.update(updated)
         listener_settings_changed = any(
             previous.get(key, DEFAULTS[key]) != updated[key]
-            for key in ('model', 'language', 'shortcut')
+            for key in ('model', 'language', 'shortcut', 'audio_source')
         )
-        was_running = listener_settings_changed and service_state() == 'active'
-        self.message.setText('Applying…' if was_running else 'Saved')
-        if was_running:
-            result = service_action('restart')
+        running = service_running()
+        selected_downloading = self.selected_model_is_downloading()
+        restart_for_selection = (self.resume_listener_after_model_change
+                                 and updated['model'] != self.resume_from_model
+                                 and not selected_downloading)
+        was_running = listener_settings_changed and running
+        if selected_downloading:
+            if running:
+                service_action('stop', background=True)
+            self.message.setText('Choose another model while this download is in progress.')
+        elif was_running:
+            self.resume_listener_after_model_change = False
+            self.resume_from_model = None
+            self.message.setText('Applying in background…')
+            result = service_action('restart', background=True)
             if isinstance(result, Exception) or result.returncode:
                 detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
                 self.message.setText(f'Saved, but could not apply: {detail or "unknown error"}')
             else:
-                self.message.setText('Saved')
+                self.message.setText('Saved; Whisper is restarting in the background.')
+        elif restart_for_selection:
+            result = service_action('start', background=True)
+            self.resume_listener_after_model_change = False
+            self.resume_from_model = None
+            self.message.setText('Saved; Whisper is starting with the selected model.')
+            if isinstance(result, Exception) or result.returncode:
+                detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
+                self.message.setText(f'Saved, but could not start Whisper: {detail or "unknown error"}')
+        else:
+            self.message.setText('Saved')
         self.app.refresh_theme()
         self.app.refresh_status()
+        self.update_service_controls(service_running())
 
     def toggle_service(self):
-        active = service_state() == 'active'
+        if self.selected_model_is_downloading():
+            self.message.setText('Choose another model while this download is in progress.')
+            return
+        active = service_running()
         result = service_action('stop' if active else 'start')
         if isinstance(result, Exception) or result.returncode:
             detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
@@ -613,7 +1177,9 @@ class Controller:
         self.window.activateWindow()
 
     def toggle_service(self):
-        action = 'stop' if service_state() == 'active' else 'start'
+        if self.window.selected_model_is_downloading():
+            return
+        action = 'stop' if service_running() else 'start'
         service_action(action)
         QTimer.singleShot(600, self.refresh_status)
 
@@ -635,16 +1201,21 @@ class Controller:
     def refresh_status(self):
         current = read_json(STATE, {'state': 'stopped'})
         state = current.get('state', 'stopped')
-        running = service_state() == 'active'
+        running = service_running()
         if not running and state not in ('stopped',):
             state = 'stopped'
-        self.overlay.hide()
-        if state == 'recording':
-            self.overlay.show_bottom_center()
-        elif state == 'transcribing':
-            self.overlay.label.setText('TRANSCRIBING')
-            self.overlay.show_bottom_center()
-        elif self.overlay.label.text() != 'LISTENING':
+        elif running and state == 'stopped':
+            state = 'listening'
+        visible_state = state in ('recording', 'transcribing')
+        if visible_state:
+            new_text = 'TRANSCRIBING' if state == 'transcribing' else 'LISTENING'
+            if self.overlay.label.text() != new_text:
+                self.overlay.label.setText(new_text)
+            if not self.overlay.isVisible():
+                self.overlay.show_bottom_center()
+        elif self.overlay.isVisible():
+            self.overlay.hide()
+        if not visible_state and self.overlay.label.text() != 'LISTENING':
             self.overlay.label.setText('LISTENING')
 
         label = {'recording': 'Recording', 'transcribing': 'Transcribing',
@@ -652,14 +1223,20 @@ class Controller:
                  'stopped': 'Stopped'}.get(state, state.title())
         badge = f'●  {label}'
         self.window.state_badge.setText(badge)
-        self.window.toggle.setText('Stop Whisper' if running else 'Start Whisper')
+        self.window.update_service_controls(running)
         self.menu.actions()[0].setText(f'Minimal Whisper: {label}')
-        self.toggle_action.setText('Stop Whisper' if running else 'Start Whisper')
+        blocked = self.window.selected_model_is_downloading()
+        self.toggle_action.setEnabled(not blocked)
+        self.toggle_action.setText('Model downloading' if blocked else
+                                   ('Stop Whisper' if running else 'Start Whisper'))
         model = current.get('model', self.settings['model'])
         self.tray.setToolTip(f'Minimal Whisper · {label} · {model}')
 
 
 def main():
+    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+        print('Minimal Whisper supports X11 only; Wayland is not supported.', file=sys.stderr)
+        return 2
     open_settings = '--background' not in sys.argv
     os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
     app = QApplication(sys.argv)

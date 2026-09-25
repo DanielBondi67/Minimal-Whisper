@@ -1,5 +1,16 @@
 [
-  {"label": "Small · multilingual · 244M parameters", "model": "small"},
+  {"label": "Tiny · English", "model": "tiny.en"},
+  {"label": "Tiny · multilingual", "model": "tiny"},
+  {"label": "Base · English", "model": "base.en"},
   {"label": "Base · multilingual", "model": "base"},
-  {"label": "Base English · faster", "model": "base.en"}
+  {"label": "Small · English", "model": "small.en"},
+  {"label": "Small · multilingual · 244M parameters", "model": "small"},
+  {"label": "Medium · English", "model": "medium.en"},
+  {"label": "Medium · multilingual", "model": "medium"},
+  {"label": "Large v1 · multilingual", "model": "large-v1"},
+  {"label": "Large v2 · multilingual", "model": "large-v2"},
+  {"label": "Large v3 · multilingual", "model": "large-v3"},
+  {"label": "Large · multilingual (alias)", "model": "large"},
+  {"label": "Large v3 Turbo · multilingual", "model": "large-v3-turbo"},
+  {"label": "Turbo · multilingual (alias)", "model": "turbo"}
 ]
