@@ -1356,6 +1356,10 @@ class Controller:
         if self.tray:
             self.tray.show()
         self.last_state = None
+        # The status file can still say "transcribing" briefly after SIGUSR1
+        # is sent. Keep an explicitly cancelled overlay dismissed until the
+        # listener acknowledges cancellation by leaving an active state.
+        self.overlay_dismissed_for_active_state = False
         self.timer = QTimer(app)
         self.timer.timeout.connect(self.refresh_status)
         self.timer.start(1000)
@@ -1406,6 +1410,7 @@ class Controller:
         except (OSError, ValueError, RuntimeError) as exc:
             self.window.message.setText(f'Could not cancel the current task: {exc}')
             return
+        self.overlay_dismissed_for_active_state = True
         self.window.message.setText('Cancelled; Whisper is ready for the next recording.')
         self.overlay.wave.set_live_levels(None)
         self.overlay.hide()
@@ -1439,7 +1444,9 @@ class Controller:
         elif running and state == 'stopped':
             state = 'listening'
         visible_state = state in ('recording', 'transcribing')
-        if visible_state:
+        if not visible_state:
+            self.overlay_dismissed_for_active_state = False
+        if visible_state and not self.overlay_dismissed_for_active_state:
             new_text = 'TRANSCRIBING' if state == 'transcribing' else 'LISTENING'
             if self.overlay.label.text() != new_text:
                 self.overlay.label.setText(new_text)
