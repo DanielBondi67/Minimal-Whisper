@@ -31,6 +31,7 @@ SETTINGS = CONFIG_HOME / 'minimal-whisper/settings.json'
 LEGACY_SETTINGS = CONFIG_HOME / 'openai-whisper/settings.json'
 STATE = STATE_HOME / 'minimal-whisper/status.json'
 PTT_PID = STATE_HOME / 'minimal-whisper/ptt.pid'
+CONTROL_PID = STATE_HOME / 'minimal-whisper/control.pid'
 LEGACY_STATE = STATE_HOME / 'openai-whisper/status.json'
 LANGUAGE_CONFIG = CONFIG_HOME / 'minimal-whisper/languages.json'
 LEGACY_LANGUAGE_CONFIG = CONFIG_HOME / 'openai-whisper/languages.json'
@@ -467,6 +468,17 @@ class Overlay(QWidget):
         max_y = max(area.top(), area.bottom() - self.height() + 1)
         return QPoint(max(area.left(), min(position.x(), max_x)),
                       max(area.top(), min(position.y(), max_y)))
+
+    def keep_on_screen(self, *_args):
+        if not self.positioning_supported or not self.position_initialized:
+            return
+        current = self.pos()
+        clamped = self.clamp_position(current)
+        if clamped != current:
+            self.move(clamped)
+            self.saved_position = {'x': clamped.x(), 'y': clamped.y()}
+            if self.position_changed:
+                self.position_changed(self.saved_position)
 
     def reset_position(self):
         if not self.positioning_supported:
@@ -1235,6 +1247,11 @@ class Controller:
         self.overlay = Overlay(self.settings['theme'], self.settings.get('overlay_position'),
                                self.overlay_position_changed,
                                self.settings.get('scale_percent', 100))
+        for screen in app.screens():
+            screen.geometryChanged.connect(self.overlay.keep_on_screen)
+            screen.availableGeometryChanged.connect(self.overlay.keep_on_screen)
+        app.screenAdded.connect(self.screen_added)
+        app.screenRemoved.connect(self.overlay.keep_on_screen)
         self.tray = (QSystemTrayIcon(make_icon(self.settings['theme']), app)
                      if QSystemTrayIcon.isSystemTrayAvailable() else None)
         self.menu = QMenu()
@@ -1261,6 +1278,11 @@ class Controller:
         self.refresh_status()
         if open_settings:
             self.show_settings()
+
+    def screen_added(self, screen):
+        screen.geometryChanged.connect(self.overlay.keep_on_screen)
+        screen.availableGeometryChanged.connect(self.overlay.keep_on_screen)
+        QTimer.singleShot(0, self.overlay.keep_on_screen)
 
     def tray_activated(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
@@ -1319,6 +1341,9 @@ class Controller:
                  'listening': 'Ready', 'error': 'Needs attention',
                  'stopped': 'Stopped'}.get(state, state.title())
         badge = f'●  {label}'
+        detail = current.get('detail', '')
+        if state == 'listening' and detail.startswith('Copied transcription'):
+            badge += ' · copied to clipboard; paste it yourself'
         self.window.state_badge.setText(badge)
         self.window.update_service_controls(running)
         self.menu.actions()[0].setText(f'Minimal Whisper: {label}')
@@ -1328,7 +1353,10 @@ class Controller:
                                    ('Stop Whisper' if running else 'Start Whisper'))
         model = current.get('model', self.settings['model'])
         if self.tray:
-            self.tray.setToolTip(f'Minimal Whisper · {label} · {model}')
+            tooltip = f'Minimal Whisper · {label} · {model}'
+            if state == 'listening' and detail.startswith('Copied transcription'):
+                tooltip += ' · clipboard ready to paste'
+            self.tray.setToolTip(tooltip)
 
 
 def main():
@@ -1350,6 +1378,17 @@ def main():
               file=sys.stderr)
         return 1
     controller = Controller(app, open_settings)
+    CONTROL_PID.parent.mkdir(parents=True, exist_ok=True)
+    CONTROL_PID.write_text(f'{os.getpid()}\n', encoding='ascii')
+
+    def remove_pidfile():
+        try:
+            if int(CONTROL_PID.read_text(encoding='ascii').strip()) == os.getpid():
+                CONTROL_PID.unlink()
+        except (OSError, ValueError):
+            pass
+
+    app.aboutToQuit.connect(remove_pidfile)
 
     def receive_request():
         while server.hasPendingConnections():

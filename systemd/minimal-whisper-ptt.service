@@ -3,7 +3,7 @@ Description=Minimal Whisper push-to-talk shortcut listener
 
 [Service]
 Type=simple
-PassEnvironment=DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
 ExecStart=%h/.local/bin/minimal-whisper-ptt
 Restart=on-failure
 RestartSec=3

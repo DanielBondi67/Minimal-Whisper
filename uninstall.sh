@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 BIN_HOME="$HOME/.local/bin"
 UNIT_HOME="$CONFIG_HOME/systemd/user"
 APP_HOME="$DATA_HOME/applications"
@@ -13,6 +14,19 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
     systemctl --user stop minimal-whisper-control.service minimal-whisper-ptt.service >/dev/null 2>&1 || true
     systemctl --user disable minimal-whisper-control.service minimal-whisper-ptt.service >/dev/null 2>&1 || true
 fi
+
+stop_pidfile() {
+    local pid_file="$1" expected="$2" pid command_line
+    [[ -r "$pid_file" ]] || return 0
+    read -r pid < "$pid_file" || return 0
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 0
+    command_line="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+    [[ "$command_line" == *"$expected"* ]] || return 0
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+}
+
+stop_pidfile "$STATE_HOME/minimal-whisper/ptt.pid" 'minimal-whisper-ptt'
+stop_pidfile "$STATE_HOME/minimal-whisper/control.pid" 'minimal-whisper-control'
 
 remove_project_link() {
     local path="$1"

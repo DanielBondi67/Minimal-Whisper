@@ -25,7 +25,7 @@ class AudioBackend:
                 pass
         if 'pipewire' in server and shutil.which('pw-record'):
             return PipeWireBackend()
-        if 'pulseaudio' in server and (shutil.which('parecord') or shutil.which('parec')):
+        if 'pulseaudio' in server and shutil.which('parecord'):
             return PulseAudioBackend()
         # Prefer a working server probe over executable presence: many systems
         # ship both clients while only one server is actually available.
@@ -36,16 +36,23 @@ class AudioBackend:
                 return PipeWireBackend()
             except (OSError, subprocess.SubprocessError):
                 pass
-        if shutil.which('pactl') and (shutil.which('parecord') or shutil.which('parec')):
+        if shutil.which('pactl') and shutil.which('parecord'):
             try:
                 subprocess.run(['pactl', 'info'], capture_output=True,
                                text=True, timeout=3, check=True)
                 return PulseAudioBackend()
             except (OSError, subprocess.SubprocessError):
                 pass
+        if shutil.which('parecord') and not shutil.which('pw-record'):
+            return PulseAudioBackend()
+        if shutil.which('pw-record'):
+            return PipeWireBackend()
+        if shutil.which('parecord'):
+            return PulseAudioBackend()
         raise AudioBackendError(
             'No supported PipeWire or PulseAudio capture backend is available. '
-            'Check that the audio server is running and that its recording client is installed.')
+            'Check that the audio server is running and install pw-record (PipeWire) '
+            'or parecord (PulseAudio).')
 
     def list_sources(self):
         if shutil.which('pactl'):
@@ -78,9 +85,10 @@ class AudioBackend:
                     is_default, node_id, name = match.groups()
                     if name.endswith('.monitor'):
                         continue
-                    devices.append((name, name))
+                    label = re.sub(r'\s+\[(?:vol|muted):.*$', '', name).strip()
+                    devices.append((label or name, node_id))
                     if is_default:
-                        default = name
+                        default = node_id
                 return default, devices
             except (OSError, subprocess.SubprocessError):
                 pass

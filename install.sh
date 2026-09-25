@@ -29,9 +29,18 @@ PTT_PYTHON="$(minimal_whisper_resolve_python)" || {
     echo 'openai-whisper and python-xlib are missing. Install requirements.txt into Minimal Whisper’s Python environment first.' >&2
     exit 1
 }
-if ! command -v pw-record >/dev/null 2>&1 && ! command -v parecord >/dev/null 2>&1 && ! command -v parec >/dev/null 2>&1; then
-    echo 'No PipeWire or PulseAudio recording client found (pw-record, parecord, or parec).' >&2
+if ! command -v pw-record >/dev/null 2>&1 && ! command -v parecord >/dev/null 2>&1; then
+    echo 'No PipeWire or PulseAudio recording client found (pw-record or parecord).' >&2
     echo 'Install a client for the audio server used by this session, then rerun install.sh.' >&2
+    exit 1
+fi
+if [[ "${XDG_SESSION_TYPE:-}" != wayland && -z "${WAYLAND_DISPLAY:-}" ]] && ! command -v xdotool >/dev/null 2>&1; then
+    echo 'The X11 shortcut/text backend requires xdotool.' >&2
+    exit 1
+fi
+if [[ "${XDG_SESSION_TYPE:-}" == wayland || -n "${WAYLAND_DISPLAY:-}" ]] && \
+   ! "$PTT_PYTHON" -c 'import ctypes.util; from PySide6.QtDBus import QDBusConnection; assert ctypes.util.find_library("dbus-1")' >/dev/null 2>&1; then
+    echo 'Wayland portal support requires PySide6.QtDBus and libdbus-1.' >&2
     exit 1
 fi
 
@@ -93,7 +102,7 @@ done
 
 if ((user_systemd)); then
     systemctl --user daemon-reload
-    systemctl --user import-environment DISPLAY XAUTHORITY XDG_SESSION_TYPE \
+    systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_SESSION_TYPE \
         XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME >/dev/null 2>&1 || true
     ((control_was_active)) && systemctl --user restart minimal-whisper-control.service || true
     ((ptt_was_active)) && systemctl --user restart minimal-whisper-ptt.service || true

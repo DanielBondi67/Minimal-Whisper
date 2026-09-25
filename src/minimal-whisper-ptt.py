@@ -65,6 +65,7 @@ print(json.dumps({name: {'file': os.path.basename(urllib.parse.urlsplit(url).pat
                          'sha256': url.rstrip('/').split('/')[-2]}
                   for name, url in whisper._MODELS.items()}))
 '''
+KEYBOARD_PORTAL = None
 
 
 def load_model_metadata():
@@ -98,6 +99,34 @@ def set_state(state, detail=''):
 def notify(title, body):
     # Status is shown in the tray UI and floating recording overlay instead.
     return None
+
+
+def insert_transcription(text):
+    global KEYBOARD_PORTAL
+    is_wayland = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+                  or bool(os.environ.get('WAYLAND_DISPLAY')))
+    if is_wayland:
+        from PySide6.QtGui import QGuiApplication
+        portal_error = ''
+        try:
+            if KEYBOARD_PORTAL is None:
+                from wayland_portal import RemoteKeyboardPortal
+                KEYBOARD_PORTAL = RemoteKeyboardPortal()
+            if KEYBOARD_PORTAL.type_text(text):
+                return 'typed through the Remote Desktop portal'
+            portal_error = KEYBOARD_PORTAL.error or ''
+        except Exception as exc:
+            portal_error = str(exc)
+        QGuiApplication.clipboard().setText(text)
+        detail = 'Copied transcription to clipboard; paste it yourself.'
+        if portal_error:
+            detail += f' Keyboard portal: {portal_error}'
+        set_state('listening', detail)
+        log(detail)
+        return 'copied to clipboard for manual paste'
+    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
+                   check=True)
+    return 'typed through the X11 backend'
 
 
 def shortcut_parts(sequence, dpy):
@@ -203,10 +232,10 @@ class Dictation:
                 log('transcription completed with no text')
                 set_state('listening')
                 return
-            subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
-                           check=True)
-            log(f'transcription typed ({len(text)} characters)')
-            notify('Done', 'Transcription inserted')
+            output_method = insert_transcription(text)
+            log(f'transcription delivered via {output_method} ({len(text)} characters)')
+            notify('Done', 'Transcription inserted' if 'typed' in output_method
+                   else 'Transcription copied; paste it yourself')
             set_state('listening')
 
         except Exception as exc:
@@ -272,9 +301,7 @@ class Dictation:
 
 def main():
     if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland' or os.environ.get('WAYLAND_DISPLAY'):
-        print('Wayland shortcut input requires the desktop Global Shortcuts portal. '
-              'This portal backend is not available yet in this build.', file=sys.stderr)
-        return 2
+        return main_wayland()
     if MODEL not in AVAILABLE_MODELS:
         print(f'Model {MODEL!r} is not listed in {MODEL_CONFIG} or config/models.json',
               file=sys.stderr)
@@ -335,6 +362,62 @@ def main():
         except FileNotFoundError:
             pass
     return 0
+
+
+def main_wayland():
+    if MODEL not in AVAILABLE_MODELS:
+        print(f'Model {MODEL!r} is not listed in {MODEL_CONFIG} or config/models.json',
+              file=sys.stderr)
+        return 2
+    from PySide6.QtGui import QGuiApplication
+    from wayland_portal import GlobalShortcutPortal
+
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])
+    app.setApplicationName('Minimal Whisper')
+    try:
+        shortcuts = GlobalShortcutPortal(SETTINGS['shortcut'])
+    except Exception as exc:
+        message = (f'Could not register the push-to-talk shortcut with the XDG Global '
+                   f'Shortcuts portal: {exc}')
+        print(message, file=sys.stderr)
+        log(message)
+        set_state('error', message)
+        return 2
+    dictation = Dictation()
+
+    def pressed():
+        if not dictation.pressed:
+            try:
+                dictation.start()
+            except Exception as exc:
+                log(f'recording error: {exc!r}')
+                set_state('error', str(exc))
+
+    def released():
+        if dictation.pressed:
+            dictation.stop_and_transcribe()
+
+    shortcuts.set_callbacks(pressed, released)
+    PTT_PID.parent.mkdir(parents=True, exist_ok=True)
+    PTT_PID.write_text(f'{os.getpid()}\n', encoding='ascii')
+    set_state('listening', 'Wayland shortcut managed by XDG portal')
+    log(f'listening through XDG Global Shortcuts portal: {SETTINGS["shortcut"]}')
+
+    def handle_term(_signum, _frame):
+        dictation.cancel()
+        app.quit()
+
+    signal.signal(signal.SIGTERM, handle_term)
+    try:
+        return app.exec()
+    finally:
+        if dictation.recorder is not None:
+            dictation.cancel()
+        set_state('stopped')
+        try:
+            PTT_PID.unlink()
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == '__main__':

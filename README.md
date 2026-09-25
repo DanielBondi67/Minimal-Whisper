@@ -1,16 +1,16 @@
 # Minimal Whisper
 
-Offline voice typing with OpenAI Whisper. The app includes settings, model downloads, microphone selection with a live level meter, a tray menu, and an X11 push-to-talk shortcut.
+Offline voice typing with OpenAI Whisper. It includes model downloads, microphone selection and level meter, an optional tray icon, and push-to-talk.
 
 ## Support
 
-Supported: Arch Linux, XFCE, X11, PipeWire with WirePlumber and its PulseAudio-compatible `pactl` interface, and a user systemd session. Wayland is not supported.
+Linux desktop sessions with a graphical session, PySide6, and PipeWire or PulseAudio recording clients are supported. X11 uses Xlib/xdotool for shortcuts and text insertion. Wayland uses the XDG Global Shortcuts portal for press/release events and the Remote Desktop portal for typed text; this requires a desktop portal backend that implements both interfaces and grants keyboard access. If the Remote Desktop portal is unavailable or permission is declined, text is copied to the clipboard for manual pasting. Wayland compositors control overlay placement, so drag positioning is disabled there. The tray is optional. Startup uses `systemd --user` when available and XDG desktop autostart otherwise.
 
 ## Dependencies
 
-Arch packages: `python`, `python-pip`, `pipewire`, `pipewire-audio`, `pipewire-pulse`, `wireplumber`, `xdotool`, and `systemd`; `pavucontrol` is optional. Python packages: `PySide6`, `openai-whisper`, and `python-xlib` (listed in `requirements.txt`).
+Dependencies: Python 3, PySide6, openai-whisper, python-xlib, and one recording client (`pw-record` for PipeWire or `parecord` for PulseAudio). X11 additionally needs `xdotool`. Wayland additionally needs PySide6.QtDBus, libdbus-1, and a portal backend with Global Shortcuts and Remote Desktop support. `pactl` is optional and enables friendly source names; without it, PipeWire uses `wpctl` for source discovery. `pavucontrol` and a user systemd manager are optional.
 
-Install the Arch dependencies, then create the app’s Python environment and install its Python packages:
+For Arch with PipeWire/X11, install the system dependencies (use PulseAudio equivalents or add GLib portal support for Wayland), then clone this repository and install the Python environment:
 
 ```bash
 sudo pacman -S python python-pip pipewire pipewire-audio pipewire-pulse wireplumber xdotool
@@ -20,7 +20,7 @@ python -m venv "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv"
 ./install.sh
 ```
 
-Start **Minimal Whisper** from the application finder. In Settings, choose an input device and confirm the live meter responds, choose a model, and download it while online. Hold the configured shortcut to record and release it to transcribe. `pactl`, `pw-record`, `xdotool`, Python with PySide6, and a Whisper/Xlib Python environment are checked by the installer.
+Run `./install.sh`, then start **Minimal Whisper** from the application finder. Choose a microphone and model in Settings, download the model while online, then hold the shortcut to record and release it to transcribe. Wayland shortcut and keyboard support depends on the desktop’s portal backend and its permission prompts.
 
 ## Models and languages
 
