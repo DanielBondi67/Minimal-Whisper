@@ -562,8 +562,27 @@ class MainWindow(QMainWindow):
 
         card = QFrame()
         card.setObjectName('card')
-        form = QFormLayout(card)
-        self.form_layout = form
+        columns = QHBoxLayout(card)
+        self.column_layout = columns
+        self.column_forms = []
+
+        def make_column(title_text):
+            column = QWidget()
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            title = QLabel(title_text)
+            title.setObjectName('sectionTitle')
+            column_layout.addWidget(title)
+            form = QFormLayout()
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            column_layout.addLayout(form)
+            columns.addWidget(column, 1, Qt.AlignmentFlag.AlignTop)
+            self.column_forms.append(form)
+            return form
+
+        model_form = make_column('TRANSCRIPTION')
+        input_form = make_column('INPUT & APPEARANCE')
         self.model = QComboBox()
         self.all_models = read_models()
         self.models = [(label, model_id) for label, model_id in self.all_models
@@ -616,45 +635,49 @@ class MainWindow(QMainWindow):
         audio_layout.setContentsMargins(0, 0, 0, 0)
         audio_layout.setSpacing(8)
         audio_layout.addWidget(self.audio_source, 1)
-        audio_layout.addWidget(self.audio_refresh)
-        audio_layout.addWidget(self.audio_meter_toggle)
         self.theme_toggle = QPushButton()
         self.theme_toggle.setObjectName('themeToggle')
         self.theme_toggle.setCheckable(True)
         self.theme_toggle.setChecked(self.settings['theme'] == 'dark')
         self.update_theme_button()
-        form.addRow('Model', self.model)
-        form.addRow('', self.check_models_button)
-        form.addRow('Model files', model_files_row)
-        form.addRow('Microphone', audio_row)
+        model_form.addRow('Model', self.model)
+        model_form.addRow(self.check_models_button)
+        model_form.addRow('Model files', model_files_row)
+        model_form.addRow('Language', self.language)
+        input_form.addRow('Microphone', audio_row)
+        audio_actions = QWidget()
+        audio_actions_layout = QHBoxLayout(audio_actions)
+        audio_actions_layout.setContentsMargins(0, 0, 0, 0)
+        audio_actions_layout.addWidget(self.audio_refresh)
+        audio_actions_layout.addWidget(self.audio_meter_toggle, 1)
+        input_form.addRow(audio_actions)
         self.audio_level = QProgressBar()
         self.audio_level.setRange(0, 100)
         self.audio_level.setValue(0)
         self.audio_level.setFormat('%p%')
         self.audio_level_text = QLabel('Microphone stays idle until monitoring or recording starts.')
         self.audio_level_text.setObjectName('muted')
-        form.addRow('Input level', self.audio_level)
-        form.addRow('', self.audio_level_text)
-        form.addRow('Language', self.language)
-        form.addRow('Shortcut', self.shortcut)
-        form.addRow('Theme', self.theme_toggle)
+        input_form.addRow('Input level', self.audio_level)
+        input_form.addRow(self.audio_level_text)
+        input_form.addRow('Shortcut', self.shortcut)
+        input_form.addRow('Theme', self.theme_toggle)
         self.scale_selector = QComboBox()
         for percent in (75, 100, 125, 150):
             self.scale_selector.addItem(f'{percent}%', percent)
         nearest_scale = normalized_scale(self.settings.get('scale_percent', 100))
         self.scale_selector.setCurrentIndex(self.scale_selector.findData(nearest_scale))
-        form.addRow('UI scale', self.scale_selector)
+        input_form.addRow('UI scale', self.scale_selector)
         self.reset_overlay = QPushButton('Reset to bottom-center')
         self.reset_overlay.setObjectName('secondary')
         wayland_session = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
                            or bool(os.environ.get('WAYLAND_DISPLAY')))
         self.reset_overlay.setEnabled(not wayland_session)
-        form.addRow('Indicator position', self.reset_overlay)
+        input_form.addRow('Indicator position', self.reset_overlay)
         if wayland_session:
             position_note = QLabel('The Wayland compositor chooses top-level window placement; dragging and saved positioning are unavailable.')
             position_note.setObjectName('muted')
             position_note.setWordWrap(True)
-            form.addRow('', position_note)
+            input_form.addRow(position_note)
         layout.addWidget(card)
 
         self.hotkey = QLabel()
@@ -666,13 +689,11 @@ class MainWindow(QMainWindow):
         self.message = QLabel('Saved')
         self.message.setObjectName('muted')
         self.message.setWordWrap(True)
-        layout.addWidget(self.message)
-
         buttons = QHBoxLayout()
         self.toggle = QPushButton('Stop Whisper' if service_running() else 'Start Whisper')
         self.toggle.setObjectName('secondary')
         buttons.addWidget(self.toggle)
-        buttons.addStretch(1)
+        buttons.addWidget(self.message, 1)
         layout.addLayout(buttons)
         self.setCentralWidget(root)
         self.toggle.clicked.connect(self.toggle_service)
@@ -1107,13 +1128,16 @@ class MainWindow(QMainWindow):
 
     def apply_scale(self):
         self.scale_factor = self.scale_selector.currentData() / 100
-        self.setFixedWidth(round(430 * self.scale_factor))
+        self.setFixedWidth(round(900 * self.scale_factor))
         self.root_layout.setContentsMargins(*(
-            round(n * self.scale_factor) for n in (26, 24, 26, 22)))
-        self.root_layout.setSpacing(round(18 * self.scale_factor))
-        self.form_layout.setContentsMargins(*(
+            round(n * self.scale_factor) for n in (24, 20, 24, 18)))
+        self.root_layout.setSpacing(round(14 * self.scale_factor))
+        self.column_layout.setContentsMargins(*(
             round(n * self.scale_factor) for n in (16, 14, 16, 14)))
-        self.form_layout.setVerticalSpacing(round(13 * self.scale_factor))
+        self.column_layout.setSpacing(round(24 * self.scale_factor))
+        for form in self.column_forms:
+            form.setVerticalSpacing(round(10 * self.scale_factor))
+            form.setHorizontalSpacing(round(12 * self.scale_factor))
         self.apply_theme()
         # Updating font and layout metrics does not resize an already visible
         # QMainWindow. Recompute the content hint so scale-downs shrink the
@@ -1166,16 +1190,19 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background: {c['window']}; color: {c['text']}; font-size: {px(13)}px; }}
             QLabel#title {{ font-size: {px(24)}px; font-weight: 700; }}
+            QLabel#sectionTitle {{ color: {c['muted']}; font-size: {px(10)}px; font-weight: 700; letter-spacing: {px(1)}px; }}
             QLabel#muted {{ color: {c['muted']}; }}
             QLabel#badge {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(12)}px; padding: {px(7)}px {px(10)}px; color: {c['text']}; font-size: {px(11)}px; }}
             QFrame#card {{ background: {c['panel']}; border: 1px solid {c['line']}; border-radius: {px(14)}px; }}
-            QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(190)}px; }}
+            QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(160)}px; }}
+            QComboBox::drop-down {{ width: 0px; border: none; }}
+            QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; }}
             QComboBox QAbstractItemView {{ background: {c['panel']}; selection-background-color: {c['accent']}; selection-color: {c['accent_text']}; }}
             QKeySequenceEdit {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(7)}px {px(9)}px; min-width: {px(190)}px; }}
             QProgressBar {{ border: 1px solid {c['line']}; border-radius: {px(5)}px; padding: {px(1)}px; height: {px(14)}px; background: {c['raised']}; text-align: center; }}
             QProgressBar::chunk {{ background: {c['accent']}; border-radius: {px(4)}px; }}
             QLabel#hotkey {{ color: {c['muted']}; padding: {px(4)}px {px(2)}px; }}
-            QPushButton {{ border: 1px solid {c['line']}; border-radius: {px(9)}px; padding: {px(10)}px {px(14)}px; font-weight: 600; }}
+            QPushButton {{ border: 1px solid {c['line']}; border-radius: {px(9)}px; padding: {px(9)}px {px(12)}px; min-height: {px(18)}px; font-weight: 600; }}
             QPushButton#primary {{ background: {c['accent']}; color: {c['accent_text']}; border-color: {c['accent']}; }}
             QPushButton#secondary {{ background: {c['raised']}; }}
             QPushButton#themeToggle {{ background: {c['raised']}; min-width: {px(190)}px; text-align: left; }}
