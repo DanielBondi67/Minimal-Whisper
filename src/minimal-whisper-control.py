@@ -678,8 +678,7 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             try:
                 self.verified_models = set(json.loads(output.decode('utf-8')))
-                self.model_catalog_status.setText(
-                    f'{len(self.verified_models)} verified model(s) downloaded.')
+                self.model_catalog_status.clear()
             except (ValueError, UnicodeDecodeError):
                 self.verified_models = set()
                 self.model_catalog_status.setText('Could not read model cache status.')
