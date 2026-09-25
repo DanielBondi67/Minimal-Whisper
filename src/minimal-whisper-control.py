@@ -771,8 +771,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def model_download_script():
-        return ('import sys, whisper; '
-                'whisper._download(whisper._MODELS[sys.argv[1]], sys.argv[2], in_memory=False)')
+        return ('import os, sys, whisper; '
+                'sys.path.insert(0, sys.argv[3]); '
+                'from model_download import download_model; '
+                'url = whisper._MODELS[sys.argv[1]]; '
+                'download_model(url, os.path.join(sys.argv[2], '
+                'os.path.basename(url.split("?")[0])))')
 
     def model_changed(self, _index):
         self.update_model_marks()
@@ -913,7 +917,12 @@ class MainWindow(QMainWindow):
                 size = self.model_remote_sizes.get(model_id)
                 size_text = human_size(size) if size else 'checking download size…'
                 status = 'Downloading…' if downloading_selected else 'Not installed'
-                if checkpoint.is_file() and checkpoint.stat().st_size > 0:
+                partial = Path(str(checkpoint) + '.partial')
+                if partial.is_file() and partial.stat().st_size > 0 and not downloading_selected:
+                    status = (f'Interrupted download · {human_size(partial.stat().st_size)} saved; '
+                              'resume available')
+                if (checkpoint.is_file() and checkpoint.stat().st_size > 0
+                        and not partial.is_file()):
                     if not downloading_selected:
                         status = f'Incomplete or invalid download ({human_size(checkpoint.stat().st_size)})'
                 self.model_status.setText(
@@ -986,7 +995,8 @@ class MainWindow(QMainWindow):
         cache.mkdir(parents=True, exist_ok=True)
         self.model_download_process.start(
             self.whisper_python,
-            ['-c', self.model_download_script(), model_id, str(cache)])
+            ['-c', self.model_download_script(), model_id, str(cache),
+             str(Path(__file__).resolve().parent)])
         self.update_service_controls(False)
 
     def uninstall_selected_model(self):
