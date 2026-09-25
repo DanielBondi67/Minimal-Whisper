@@ -9,8 +9,10 @@ UNIT_HOME="$CONFIG_HOME/systemd/user"
 APP_HOME="$DATA_HOME/applications"
 ICON_HOME="$DATA_HOME/icons/hicolor"
 
-systemctl --user stop minimal-whisper-control.service minimal-whisper-ptt.service >/dev/null 2>&1 || true
-systemctl --user disable minimal-whisper-control.service minimal-whisper-ptt.service >/dev/null 2>&1 || true
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user stop minimal-whisper-control.service minimal-whisper-ptt.service >/dev/null 2>&1 || true
+    systemctl --user disable minimal-whisper-control.service minimal-whisper-ptt.service >/dev/null 2>&1 || true
+fi
 
 remove_project_link() {
     local path="$1"
@@ -24,7 +26,7 @@ remove_project_link() {
 }
 
 for name in minimal-whisper-control minimal-whisper-ptt \
-            minimal-whisper-control.py minimal-whisper-ptt.py; do
+            minimal-whisper-control.py minimal-whisper-ptt.py minimal-whisper-start; do
     remove_project_link "$BIN_HOME/$name"
 done
 for name in minimal-whisper-control.service minimal-whisper-ptt.service; do
@@ -35,7 +37,9 @@ remove_project_link "$CONFIG_HOME/autostart/minimal-whisper-control.desktop"
 remove_project_link "$CONFIG_HOME/autostart/minimal-whisper-ptt.desktop"
 remove_project_link "$ICON_HOME/scalable/apps/minimal-whisper.svg"
 
-systemctl --user daemon-reload >/dev/null 2>&1 || true
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+fi
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APP_HOME" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f "$ICON_HOME" >/dev/null 2>&1 || true
 

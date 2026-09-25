@@ -10,13 +10,8 @@ UNIT_HOME="$CONFIG_HOME/systemd/user"
 APP_HOME="$DATA_HOME/applications"
 ICON_HOME="$DATA_HOME/icons/hicolor"
 
-if [[ "${XDG_SESSION_TYPE:-}" == wayland ]]; then
-    echo 'Minimal Whisper supports X11 only. Wayland sessions are not supported.' >&2
-    exit 1
-fi
-
 missing=()
-for command in systemctl pactl pw-record xdotool python3; do
+for command in python3; do
     command -v "$command" >/dev/null 2>&1 || missing+=("$command")
 done
 if ((${#missing[@]})); then
@@ -34,6 +29,11 @@ PTT_PYTHON="$(minimal_whisper_resolve_python)" || {
     echo 'openai-whisper and python-xlib are missing. Install requirements.txt into Minimal Whisper’s Python environment first.' >&2
     exit 1
 }
+if ! command -v pw-record >/dev/null 2>&1 && ! command -v parecord >/dev/null 2>&1 && ! command -v parec >/dev/null 2>&1; then
+    echo 'No PipeWire or PulseAudio recording client found (pw-record, parecord, or parec).' >&2
+    echo 'Install a client for the audio server used by this session, then rerun install.sh.' >&2
+    exit 1
+fi
 
 mkdir -p "$CONFIG_HOME/minimal-whisper" "$STATE_HOME/minimal-whisper"
 for name in settings.json languages.json models.json; do
@@ -48,12 +48,16 @@ if [[ ! -e "$STATE_HOME/minimal-whisper/ptt.log" && -f "$STATE_HOME/whisper-ptt.
     cp -p "$STATE_HOME/whisper-ptt.log" "$STATE_HOME/minimal-whisper/ptt.log"
 fi
 
+user_systemd=0
 control_was_active=0
 ptt_was_active=0
-systemctl --user is-active --quiet minimal-whisper-control.service && control_was_active=1 || true
-systemctl --user is-active --quiet minimal-whisper-ptt.service && ptt_was_active=1 || true
-systemctl --user stop openai-whisper-control.service openai-whisper-ptt.service >/dev/null 2>&1 || true
-systemctl --user disable openai-whisper-control.service openai-whisper-ptt.service >/dev/null 2>&1 || true
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    user_systemd=1
+    systemctl --user is-active --quiet minimal-whisper-control.service && control_was_active=1 || true
+    systemctl --user is-active --quiet minimal-whisper-ptt.service && ptt_was_active=1 || true
+    systemctl --user stop openai-whisper-control.service openai-whisper-ptt.service >/dev/null 2>&1 || true
+    systemctl --user disable openai-whisper-control.service openai-whisper-ptt.service >/dev/null 2>&1 || true
+fi
 
 link_file() {
     local source_path="$1" target_path="$2"
@@ -65,6 +69,7 @@ link_file "$PROJECT_DIR/src/minimal-whisper-control.py" "$BIN_HOME/minimal-whisp
 link_file "$PROJECT_DIR/src/minimal-whisper-ptt.py" "$BIN_HOME/minimal-whisper-ptt.py"
 link_file "$PROJECT_DIR/bin/minimal-whisper-control" "$BIN_HOME/minimal-whisper-control"
 link_file "$PROJECT_DIR/bin/minimal-whisper-ptt" "$BIN_HOME/minimal-whisper-ptt"
+link_file "$PROJECT_DIR/bin/minimal-whisper-start" "$BIN_HOME/minimal-whisper-start"
 link_file "$PROJECT_DIR/systemd/minimal-whisper-control.service" "$UNIT_HOME/minimal-whisper-control.service"
 link_file "$PROJECT_DIR/systemd/minimal-whisper-ptt.service" "$UNIT_HOME/minimal-whisper-ptt.service"
 link_file "$PROJECT_DIR/desktop/minimal-whisper.desktop" "$APP_HOME/minimal-whisper.desktop"
@@ -86,17 +91,13 @@ for old_path in \
     [[ ! -L "$old_path" ]] || rm -- "$old_path"
 done
 
-panel_config="$CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
-if [[ -f "$panel_config" ]]; then
-    sed -i -e 's/value="openai-whisper\.desktop"/value="minimal-whisper.desktop"/g' \
-        -e 's/value="OpenAI Whisper"/value="Minimal Whisper"/g' "$panel_config"
+if ((user_systemd)); then
+    systemctl --user daemon-reload
+    systemctl --user import-environment DISPLAY XAUTHORITY XDG_SESSION_TYPE \
+        XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME >/dev/null 2>&1 || true
+    ((control_was_active)) && systemctl --user restart minimal-whisper-control.service || true
+    ((ptt_was_active)) && systemctl --user restart minimal-whisper-ptt.service || true
 fi
-
-systemctl --user daemon-reload
-systemctl --user import-environment DISPLAY XAUTHORITY XDG_SESSION_TYPE \
-    XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME >/dev/null 2>&1 || true
-((control_was_active)) && systemctl --user restart minimal-whisper-control.service || true
-((ptt_was_active)) && systemctl --user restart minimal-whisper-ptt.service || true
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APP_HOME" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f "$ICON_HOME" >/dev/null 2>&1 || true
 

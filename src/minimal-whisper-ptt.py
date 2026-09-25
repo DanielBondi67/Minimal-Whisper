@@ -10,6 +10,8 @@ import tempfile
 import time
 import urllib.parse
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from audio_backend import AudioBackend
 
 from Xlib import X, XK, display, error
 
@@ -20,6 +22,7 @@ CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache'))
 CONFIG = CONFIG_HOME / 'minimal-whisper/settings.json'
 LEGACY_CONFIG = CONFIG_HOME / 'openai-whisper/settings.json'
 STATE = STATE_HOME / 'minimal-whisper/status.json'
+PTT_PID = STATE_HOME / 'minimal-whisper/ptt.pid'
 MODEL_CONFIG = CONFIG_HOME / 'minimal-whisper/models.json'
 LEGACY_MODEL_CONFIG = CONFIG_HOME / 'openai-whisper/models.json'
 BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
@@ -136,11 +139,8 @@ class Dictation:
         self.wav = Path(self.temp.name) / 'recording.wav'
         logfile = LOG.open('a', encoding='utf-8')
         try:
-            command = ['pw-record']
             source = SETTINGS.get('audio_source')
-            if source:
-                command.extend(['--target', source])
-            command.extend(['--rate', '16000', '--channels', '1', '--format', 's16', str(self.wav)])
+            command = AudioBackend.detect().recording_command(source, self.wav, 16000, 1)
             self.recorder = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=logfile,
@@ -149,7 +149,7 @@ class Dictation:
             logfile.close()
         time.sleep(0.15)
         if self.recorder.poll() is not None:
-            raise RuntimeError(f'pw-record exited before capture started; see {LOG}')
+            raise RuntimeError(f'{AudioBackend.detect().name} recorder exited before capture started; see {LOG}')
         self.pressed = True
         set_state('recording')
         log(f'recording started model={MODEL}')
@@ -271,8 +271,9 @@ class Dictation:
 
 
 def main():
-    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
-        print('Minimal Whisper supports X11 only; Wayland is not supported.', file=sys.stderr)
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland' or os.environ.get('WAYLAND_DISPLAY'):
+        print('Wayland shortcut input requires the desktop Global Shortcuts portal. '
+              'This portal backend is not available yet in this build.', file=sys.stderr)
         return 2
     if MODEL not in AVAILABLE_MODELS:
         print(f'Model {MODEL!r} is not listed in {MODEL_CONFIG} or config/models.json',
@@ -291,6 +292,8 @@ def main():
         raise RuntimeError(f'{SETTINGS["shortcut"]} is already grabbed by another application') from exc
 
     log(f'listening on {SETTINGS["shortcut"]} (layout keycode {keycode}), model={MODEL}')
+    PTT_PID.parent.mkdir(parents=True, exist_ok=True)
+    PTT_PID.write_text(f'{os.getpid()}\n', encoding='ascii')
     set_state('listening')
     notify('Ready', f'Hold {SETTINGS["shortcut"]} to dictate')
     dictation = Dictation()
@@ -327,6 +330,10 @@ def main():
             dictation.stop_and_transcribe()
         dpy.close()
         set_state('stopped')
+        try:
+            PTT_PID.unlink()
+        except FileNotFoundError:
+            pass
     return 0
 
 
