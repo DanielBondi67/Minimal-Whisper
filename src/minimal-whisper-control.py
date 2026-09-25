@@ -19,7 +19,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket, QNetworkAccessManager,
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QKeySequenceEdit, QMainWindow, QMenu, QPushButton, QSystemTrayIcon,
-    QMessageBox, QProgressBar, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 HOME = Path.home()
@@ -570,6 +570,8 @@ class MainWindow(QMainWindow):
         def make_column(title_text):
             column = QFrame()
             column.setObjectName('settingsColumn')
+            column.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                 QSizePolicy.Policy.Preferred)
             column_layout = QVBoxLayout(column)
             column_layout.setContentsMargins(0, 0, 0, 0)
             title = QLabel(title_text)
@@ -1145,6 +1147,14 @@ class MainWindow(QMainWindow):
             form.setVerticalSpacing(round(10 * self.scale_factor))
             form.setHorizontalSpacing(round(12 * self.scale_factor))
         self.apply_theme()
+        for column in self.column_widgets:
+            column.setMinimumHeight(0)
+            column.layout().activate()
+            column.updateGeometry()
+        panel_height = max(column.sizeHint().height()
+                           for column in self.column_widgets)
+        for column in self.column_widgets:
+            column.setMinimumHeight(panel_height)
         # Updating font and layout metrics does not resize an already visible
         # QMainWindow. Recompute the content hint so scale-downs shrink the
         # window vertically as well as horizontally.
