@@ -12,6 +12,7 @@ import urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_backend import AudioBackend
+from text_output import normalize_transcription
 
 from Xlib import X, XK, display, error
 
@@ -103,6 +104,7 @@ def notify(title, body):
 
 def insert_transcription(text):
     global KEYBOARD_PORTAL
+    text = normalize_transcription(text)
     is_wayland = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
                   or bool(os.environ.get('WAYLAND_DISPLAY')))
     if is_wayland:
@@ -224,7 +226,8 @@ class Dictation:
                 result = subprocess.run(command, stdin=subprocess.DEVNULL,
                                         stdout=f, stderr=f, check=False)
             output = wav.with_suffix('.txt')
-            text = output.read_text(encoding='utf-8').strip() if output.exists() else ''
+            text = normalize_transcription(
+                output.read_text(encoding='utf-8') if output.exists() else '')
             if result.returncode != 0:
                 raise RuntimeError(f'Whisper exited with status {result.returncode}; see {LOG}')
             if not text:

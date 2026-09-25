@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from src.audio_backend import AudioBackend, PipeWireBackend, PulseAudioBackend
+from src.text_output import normalize_transcription
 from src.wayland_portal import PortalError, _portal_trigger
 
 
@@ -46,6 +47,17 @@ class PortalShortcutTests(unittest.TestCase):
     def test_rejects_shortcut_without_modifier(self):
         with self.assertRaises(PortalError):
             _portal_trigger('y')
+
+
+class TextOutputTests(unittest.TestCase):
+    def test_line_breaks_do_not_become_keyboard_return_events(self):
+        self.assertEqual(normalize_transcription(
+            'First sentence.\r\nSecond sentence.\n'),
+            'First sentence. Second sentence.')
+
+    def test_unicode_paragraph_separators_are_replaced(self):
+        self.assertEqual(normalize_transcription('one\u2028two\u2029three'),
+                         'one two three')
 
 
 if __name__ == '__main__':
