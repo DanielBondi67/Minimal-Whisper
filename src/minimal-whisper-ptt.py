@@ -7,9 +7,15 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from audio_backend import AudioBackend
+from audio_waveform import pcm_waveform_levels, wav_data_offset
+from shortcut_cancel import ShortcutReleaseGate
+from text_output import normalize_transcription
 
 from Xlib import X, XK, display, error
 
@@ -20,6 +26,7 @@ CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache'))
 CONFIG = CONFIG_HOME / 'minimal-whisper/settings.json'
 LEGACY_CONFIG = CONFIG_HOME / 'openai-whisper/settings.json'
 STATE = STATE_HOME / 'minimal-whisper/status.json'
+PTT_PID = STATE_HOME / 'minimal-whisper/ptt.pid'
 MODEL_CONFIG = CONFIG_HOME / 'minimal-whisper/models.json'
 LEGACY_MODEL_CONFIG = CONFIG_HOME / 'openai-whisper/models.json'
 BUILTIN_MODEL_CONFIG = Path(__file__).resolve().parent.parent / 'config/models.json'
@@ -62,6 +69,7 @@ print(json.dumps({name: {'file': os.path.basename(urllib.parse.urlsplit(url).pat
                          'sha256': url.rstrip('/').split('/')[-2]}
                   for name, url in whisper._MODELS.items()}))
 '''
+KEYBOARD_PORTAL = None
 
 
 def load_model_metadata():
@@ -80,10 +88,12 @@ def log(message):
         f.flush()
 
 
-def set_state(state, detail=''):
+def set_state(state, detail='', waveform=None):
     STATE.parent.mkdir(parents=True, exist_ok=True)
     payload = {'state': state, 'detail': detail, 'model': MODEL,
                'language': LANGUAGE, 'updated': time.time()}
+    if waveform is not None:
+        payload['waveform'] = waveform
     tmp = STATE.with_suffix('.tmp')
     try:
         tmp.write_text(json.dumps(payload), encoding='utf-8')
@@ -95,6 +105,55 @@ def set_state(state, detail=''):
 def notify(title, body):
     # Status is shown in the tray UI and floating recording overlay instead.
     return None
+
+
+def insert_transcription(text, dictation):
+    global KEYBOARD_PORTAL
+    if dictation.cancel_requested.is_set():
+        return None
+    text = normalize_transcription(text)
+    is_wayland = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+                  or bool(os.environ.get('WAYLAND_DISPLAY')))
+    if is_wayland:
+        from PySide6.QtGui import QGuiApplication
+        portal_error = ''
+        try:
+            if KEYBOARD_PORTAL is None:
+                from wayland_portal import RemoteKeyboardPortal
+                KEYBOARD_PORTAL = RemoteKeyboardPortal()
+            if KEYBOARD_PORTAL.type_text(text, cancelled=dictation.cancel_requested.is_set):
+                return 'typed through the Remote Desktop portal'
+            portal_error = KEYBOARD_PORTAL.error or ''
+        except Exception as exc:
+            portal_error = str(exc)
+        if dictation.cancel_requested.is_set():
+            return None
+        QGuiApplication.clipboard().setText(text)
+        detail = 'Copied transcription to clipboard; paste it yourself.'
+        if portal_error:
+            detail += f' Keyboard portal: {portal_error}'
+        set_state('listening', detail)
+        log(detail)
+        return 'copied to clipboard for manual paste'
+    process = subprocess.Popen(
+        ['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
+        stdin=subprocess.DEVNULL)
+    dictation.typing_process = process
+    try:
+        while process.poll() is None:
+            if dictation.cancel_requested.wait(0.02):
+                if process.poll() is None:
+                    process.terminate()
+                break
+        return_code = process.wait()
+    finally:
+        if dictation.typing_process is process:
+            dictation.typing_process = None
+    if dictation.cancel_requested.is_set():
+        return None
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, process.args)
+    return 'typed through the X11 backend'
 
 
 def shortcut_parts(sequence, dpy):
@@ -129,18 +188,21 @@ class Dictation:
         self.temp = None
         self.wav = None
         self.recorder = None
+        self.transcriber = None
+        self.typing_process = None
         self.pressed = False
+        self.waveform_stop = threading.Event()
+        self.waveform_thread = None
+        self.cancel_requested = threading.Event()
 
     def start(self):
+        self.cancel_requested.clear()
         self.temp = tempfile.TemporaryDirectory(prefix='minimal-whisper-')
         self.wav = Path(self.temp.name) / 'recording.wav'
         logfile = LOG.open('a', encoding='utf-8')
         try:
-            command = ['pw-record']
             source = SETTINGS.get('audio_source')
-            if source:
-                command.extend(['--target', source])
-            command.extend(['--rate', '16000', '--channels', '1', '--format', 's16', str(self.wav)])
+            command = AudioBackend.detect().recording_command(source, self.wav, 16000, 1)
             self.recorder = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=logfile,
@@ -149,11 +211,40 @@ class Dictation:
             logfile.close()
         time.sleep(0.15)
         if self.recorder.poll() is not None:
-            raise RuntimeError(f'pw-record exited before capture started; see {LOG}')
+            raise RuntimeError(f'{AudioBackend.detect().name} recorder exited before capture started; see {LOG}')
         self.pressed = True
-        set_state('recording')
+        self.waveform_stop = threading.Event()
+        set_state('recording', waveform=[0.0] * 17)
+        self.waveform_thread = threading.Thread(
+            target=self.monitor_waveform, args=(self.wav,), daemon=True)
+        self.waveform_thread.start()
         log(f'recording started model={MODEL}')
         notify('Recording', 'Release the shortcut to transcribe')
+
+    def monitor_waveform(self, wav):
+        offset = None
+        while not self.waveform_stop.wait(0.05):
+            try:
+                with wav.open('rb') as recording:
+                    if offset is None:
+                        offset = wav_data_offset(recording)
+                    if offset is None:
+                        continue
+                    recording.seek(offset)
+                    data = recording.read()
+                offset += len(data)
+                if len(data) > 3200:
+                    data = data[-3200:]
+                usable = len(data) & ~1
+                if usable:
+                    levels = pcm_waveform_levels(data[:usable])
+                else:
+                    levels = [0.0] * 17
+                set_state('recording', waveform=levels)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                log(f'could not read live recording waveform: {exc!r}')
 
     def stop_and_transcribe(self):
         proc, wav, temp = self.recorder, self.wav, self.temp
@@ -161,15 +252,20 @@ class Dictation:
         self.pressed = False
         if proc is None:
             return
+        self.waveform_stop.set()
         try:
             proc.send_signal(signal.SIGINT)
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.terminate()
             proc.wait(timeout=3)
+        if self.waveform_thread is not None:
+            self.waveform_thread.join(timeout=1)
+            self.waveform_thread = None
         if not wav.exists() or wav.stat().st_size < 2048:
             notify('No recording', 'No audio was captured. Check the default microphone source.')
             log('recording was empty or too short')
+            set_state('listening')
             temp.cleanup()
             return
 
@@ -183,6 +279,11 @@ class Dictation:
             set_state('error', message)
             temp.cleanup()
             return
+        if self.cancel_requested.is_set():
+            log('transcription cancelled before inference started')
+            set_state('listening')
+            temp.cleanup()
+            return
 
         command = [sys.executable, '-m', 'whisper', str(wav), '--model', transcription_model,
                    '--model_dir', str(CACHE),
@@ -192,21 +293,39 @@ class Dictation:
             command.extend(['--language', LANGUAGE])
         try:
             with LOG.open('a', encoding='utf-8') as f:
-                result = subprocess.run(command, stdin=subprocess.DEVNULL,
-                                        stdout=f, stderr=f, check=False)
+                self.transcriber = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL, stdout=f, stderr=f)
+                if self.cancel_requested.is_set() and self.transcriber.poll() is None:
+                    self.transcriber.terminate()
+                return_code = self.transcriber.wait()
+                self.transcriber = None
+            if self.cancel_requested.is_set():
+                log('transcription cancelled')
+                set_state('listening')
+                return
             output = wav.with_suffix('.txt')
-            text = output.read_text(encoding='utf-8').strip() if output.exists() else ''
-            if result.returncode != 0:
-                raise RuntimeError(f'Whisper exited with status {result.returncode}; see {LOG}')
+            text = normalize_transcription(
+                output.read_text(encoding='utf-8') if output.exists() else '')
+            if return_code != 0:
+                raise RuntimeError(f'Whisper exited with status {return_code}; see {LOG}')
             if not text:
                 notify('No speech detected', 'Try again, speaking clearly into the default microphone.')
                 log('transcription completed with no text')
                 set_state('listening')
                 return
-            subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
-                           check=True)
-            log(f'transcription typed ({len(text)} characters)')
-            notify('Done', 'Transcription inserted')
+            if self.cancel_requested.is_set():
+                log('transcription cancelled before text insertion')
+                set_state('listening')
+                return
+            set_state('delivering')
+            output_method = insert_transcription(text, self)
+            if output_method is None or self.cancel_requested.is_set():
+                log('text delivery cancelled')
+                set_state('listening')
+                return
+            log(f'transcription delivered via {output_method} ({len(text)} characters)')
+            notify('Done', 'Transcription inserted' if 'typed' in output_method
+                   else 'Transcription copied; paste it yourself')
             set_state('listening')
 
         except Exception as exc:
@@ -257,6 +376,7 @@ class Dictation:
         proc, temp = self.recorder, self.temp
         self.recorder = self.wav = self.temp = None
         self.pressed = False
+        self.waveform_stop.set()
         if proc is not None and proc.poll() is None:
             proc.send_signal(signal.SIGINT)
             try:
@@ -264,16 +384,76 @@ class Dictation:
             except subprocess.TimeoutExpired:
                 proc.terminate()
                 proc.wait(timeout=2)
+        if self.waveform_thread is not None:
+            self.waveform_thread.join(timeout=1)
+            self.waveform_thread = None
+        transcriber = self.transcriber
+        if transcriber is not None and transcriber.poll() is None:
+            transcriber.terminate()
+            try:
+                transcriber.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                transcriber.kill()
+                transcriber.wait(timeout=2)
+        self.transcriber = None
+        typing_process = self.typing_process
+        if typing_process is not None and typing_process.poll() is None:
+            typing_process.terminate()
+            try:
+                typing_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                typing_process.kill()
+                typing_process.wait(timeout=2)
+        self.typing_process = None
         if temp is not None:
             temp.cleanup()
         set_state('stopped')
         log('recording cancelled during shutdown')
 
+    def cancel_current(self):
+        self.cancel_requested.set()
+        self.waveform_stop.set()
+        set_state('cancelling')
+        proc, temp = self.recorder, self.temp
+        if proc is not None:
+            self.recorder = self.wav = self.temp = None
+            self.pressed = False
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+            if self.waveform_thread is not None:
+                self.waveform_thread.join(timeout=1)
+                self.waveform_thread = None
+            if temp is not None:
+                temp.cleanup()
+
+        transcriber = self.transcriber
+        if transcriber is not None and transcriber.poll() is None:
+            transcriber.terminate()
+            try:
+                transcriber.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                transcriber.kill()
+                transcriber.wait(timeout=2)
+        typing_process = self.typing_process
+        if typing_process is not None and typing_process.poll() is None:
+            typing_process.terminate()
+            try:
+                typing_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                typing_process.kill()
+                typing_process.wait(timeout=2)
+        set_state('listening')
+        log('current recording or transcription cancelled')
+
 
 def main():
-    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
-        print('Minimal Whisper supports X11 only; Wayland is not supported.', file=sys.stderr)
-        return 2
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland' or os.environ.get('WAYLAND_DISPLAY'):
+        return main_wayland()
     if MODEL not in AVAILABLE_MODELS:
         print(f'Model {MODEL!r} is not listed in {MODEL_CONFIG} or config/models.json',
               file=sys.stderr)
@@ -291,19 +471,29 @@ def main():
         raise RuntimeError(f'{SETTINGS["shortcut"]} is already grabbed by another application') from exc
 
     log(f'listening on {SETTINGS["shortcut"]} (layout keycode {keycode}), model={MODEL}')
+    PTT_PID.parent.mkdir(parents=True, exist_ok=True)
+    PTT_PID.write_text(f'{os.getpid()}\n', encoding='ascii')
     set_state('listening')
     notify('Ready', f'Hold {SETTINGS["shortcut"]} to dictate')
     dictation = Dictation()
+    shortcut_gate = ShortcutReleaseGate()
 
     def handle_term(_signum, _frame):
         dictation.cancel()
         raise SystemExit(0)
 
+    def handle_cancel(_signum, _frame):
+        shortcut_gate.cancel_held_shortcut(dictation.pressed)
+        dictation.cancel_current()
+
     signal.signal(signal.SIGTERM, handle_term)
+    signal.signal(signal.SIGUSR1, handle_cancel)
     try:
         while True:
             event = dpy.next_event()
             if event.type == X.KeyPress and event.detail == keycode:
+                if not shortcut_gate.may_start():
+                    continue
                 if not dictation.pressed:
                     try:
                         dictation.start()
@@ -311,12 +501,14 @@ def main():
                         log(f'recording error: {exc!r}')
                         set_state('error', str(exc))
                         notify('Recording error', str(exc))
-            elif event.type == X.KeyRelease and event.detail == keycode and dictation.pressed:
+            elif event.type == X.KeyRelease and event.detail == keycode:
                 # X11 synthesizes release/press pairs for autorepeat; ignore those while Y remains down.
                 keymap = dpy.query_keymap()
-                if keymap[keycode // 8] & (1 << (keycode % 8)):
+                physically_down = bool(keymap[keycode // 8] & (1 << (keycode % 8)))
+                if not shortcut_gate.release(physically_down):
                     continue
-                dictation.stop_and_transcribe()
+                if dictation.pressed:
+                    dictation.stop_and_transcribe()
     except KeyboardInterrupt:
         pass
     finally:
@@ -327,7 +519,77 @@ def main():
             dictation.stop_and_transcribe()
         dpy.close()
         set_state('stopped')
+        try:
+            PTT_PID.unlink()
+        except FileNotFoundError:
+            pass
     return 0
+
+
+def main_wayland():
+    if MODEL not in AVAILABLE_MODELS:
+        print(f'Model {MODEL!r} is not listed in {MODEL_CONFIG} or config/models.json',
+              file=sys.stderr)
+        return 2
+    from PySide6.QtGui import QGuiApplication
+    from wayland_portal import GlobalShortcutPortal
+
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])
+    app.setApplicationName('Minimal Whisper')
+    try:
+        shortcuts = GlobalShortcutPortal(SETTINGS['shortcut'])
+    except Exception as exc:
+        message = (f'Could not register the push-to-talk shortcut with the XDG Global '
+                   f'Shortcuts portal: {exc}')
+        print(message, file=sys.stderr)
+        log(message)
+        set_state('error', message)
+        return 2
+    dictation = Dictation()
+    shortcut_gate = ShortcutReleaseGate()
+
+    def pressed():
+        if not shortcut_gate.may_start():
+            return
+        if not dictation.pressed:
+            try:
+                dictation.start()
+            except Exception as exc:
+                log(f'recording error: {exc!r}')
+                set_state('error', str(exc))
+
+    def released():
+        if not shortcut_gate.release():
+            return
+        if dictation.pressed:
+            dictation.stop_and_transcribe()
+
+    shortcuts.set_callbacks(pressed, released)
+    PTT_PID.parent.mkdir(parents=True, exist_ok=True)
+    PTT_PID.write_text(f'{os.getpid()}\n', encoding='ascii')
+    set_state('listening', 'Wayland shortcut managed by XDG portal')
+    log(f'listening through XDG Global Shortcuts portal: {SETTINGS["shortcut"]}')
+
+    def handle_term(_signum, _frame):
+        dictation.cancel()
+        app.quit()
+
+    def handle_cancel(_signum, _frame):
+        shortcut_gate.cancel_held_shortcut(dictation.pressed)
+        dictation.cancel_current()
+
+    signal.signal(signal.SIGTERM, handle_term)
+    signal.signal(signal.SIGUSR1, handle_cancel)
+    try:
+        return app.exec()
+    finally:
+        if dictation.recorder is not None:
+            dictation.cancel()
+        set_state('stopped')
+        try:
+            PTT_PID.unlink()
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == '__main__':

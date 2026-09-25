@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import signal
 import re
 import shutil
 import struct
@@ -9,6 +10,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from audio_backend import AudioBackend, AudioBackendError
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QPointF, QProcess, QUrl
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
@@ -16,7 +19,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket, QNetworkAccessManager,
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QKeySequenceEdit, QMainWindow, QMenu, QPushButton, QSystemTrayIcon,
-    QMessageBox, QProgressBar, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 HOME = Path.home()
@@ -27,6 +30,8 @@ CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache'))
 SETTINGS = CONFIG_HOME / 'minimal-whisper/settings.json'
 LEGACY_SETTINGS = CONFIG_HOME / 'openai-whisper/settings.json'
 STATE = STATE_HOME / 'minimal-whisper/status.json'
+PTT_PID = STATE_HOME / 'minimal-whisper/ptt.pid'
+CONTROL_PID = STATE_HOME / 'minimal-whisper/control.pid'
 LEGACY_STATE = STATE_HOME / 'openai-whisper/status.json'
 LANGUAGE_CONFIG = CONFIG_HOME / 'minimal-whisper/languages.json'
 LEGACY_LANGUAGE_CONFIG = CONFIG_HOME / 'openai-whisper/languages.json'
@@ -179,20 +184,9 @@ def human_size(size):
 
 def read_audio_sources():
     try:
-        default = subprocess.run(['pactl', 'get-default-source'], capture_output=True,
-                                 text=True, timeout=3, check=True).stdout.strip()
-        output = subprocess.run(['pactl', 'list', 'sources'], capture_output=True,
-                                text=True, timeout=3, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
+        return AudioBackend.detect().list_sources()
+    except AudioBackendError:
         return '', []
-    devices = []
-    for block in re.split(r'(?m)^Source #\d+\s*$', output)[1:]:
-        name = re.search(r'(?m)^\s*Name:\s*(.+?)\s*$', block)
-        description = re.search(r'(?m)^\s*Description:\s*(.+?)\s*$', block)
-        if name and not name.group(1).endswith('.monitor'):
-            devices.append((description.group(1) if description else name.group(1),
-                            name.group(1)))
-    return default, devices
 
 
 def write_settings(data):
@@ -216,13 +210,41 @@ def valid_shortcut_sequence(sequence):
         and parts[-1] not in modifiers
 
 
-def service_state():
+def user_systemd_available():
+    if not shutil.which('systemctl'):
+        return False
     try:
-        result = subprocess.run(['systemctl', '--user', 'is-active', SERVICE],
-                                capture_output=True, text=True, timeout=2)
-        return result.stdout.strip() or 'stopped'
+        subprocess.run(['systemctl', '--user', 'show-environment'], capture_output=True,
+                       text=True, timeout=2, check=True)
+        return True
     except (OSError, subprocess.TimeoutExpired):
-        return 'unknown'
+        return False
+    except subprocess.CalledProcessError:
+        return False
+
+
+def fallback_listener_pid():
+    try:
+        pid = int(PTT_PID.read_text(encoding='ascii').strip())
+        os.kill(pid, 0)
+        command = Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(
+            'utf-8', errors='replace')
+        if 'minimal-whisper-ptt' in command:
+            return pid
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def service_state():
+    if user_systemd_available():
+        try:
+            result = subprocess.run(['systemctl', '--user', 'is-active', SERVICE],
+                                    capture_output=True, text=True, timeout=2)
+            return result.stdout.strip() or 'stopped'
+        except (OSError, subprocess.TimeoutExpired):
+            return 'unknown'
+    return 'active' if fallback_listener_pid() else 'stopped'
 
 
 def service_running():
@@ -230,6 +252,42 @@ def service_running():
 
 
 def service_action(action, background=False):
+    if not user_systemd_available():
+        pid = fallback_listener_pid()
+        try:
+            if action == 'start':
+                if pid:
+                    return subprocess.CompletedProcess([], 0, '', '')
+                launcher = HOME / '.local/bin/minimal-whisper-ptt'
+                if not launcher.is_file():
+                    raise FileNotFoundError(f'Listener launcher not found: {launcher}')
+                log_path = STATE_HOME / 'minimal-whisper/ptt.log'
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open('a', encoding='utf-8') as log_file:
+                    process = subprocess.Popen([str(launcher)], stdin=subprocess.DEVNULL,
+                                               stdout=log_file, stderr=log_file,
+                                               start_new_session=True)
+                PTT_PID.parent.mkdir(parents=True, exist_ok=True)
+                PTT_PID.write_text(f'{process.pid}\n', encoding='ascii')
+                return subprocess.CompletedProcess([], 0, '', '')
+            if action == 'stop':
+                if pid:
+                    os.kill(pid, signal.SIGTERM)
+                    if not background:
+                        deadline = time.monotonic() + 3
+                        while fallback_listener_pid() and time.monotonic() < deadline:
+                            time.sleep(0.05)
+                return subprocess.CompletedProcess([], 0, '', '')
+            if action == 'restart':
+                if pid:
+                    os.kill(pid, signal.SIGTERM)
+                    deadline = time.monotonic() + 3
+                    while fallback_listener_pid() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                return service_action('start', background=background)
+            raise ValueError(f'Unsupported listener action: {action}')
+        except (OSError, ValueError) as exc:
+            return exc
     try:
         command = ['systemctl', '--user']
         if background:
@@ -264,11 +322,24 @@ class Waveform(QWidget):
         self.color = color
         self.scale = scale
         self.phase = 0.0
+        self.live_levels = None
         self.setMinimumSize(round(76 * scale), round(24 * scale))
 
     def advance(self):
         self.phase += 0.24
         self.update()
+
+    def set_live_levels(self, levels):
+        if not isinstance(levels, list) or not levels:
+            normalized = None
+        else:
+            try:
+                normalized = tuple(max(0.0, min(1.0, float(level))) for level in levels)
+            except (TypeError, ValueError):
+                normalized = None
+        if normalized != self.live_levels:
+            self.live_levels = normalized
+            self.update()
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -276,12 +347,16 @@ class Waveform(QWidget):
         p.setPen(QPen(self.color, 2.2 * self.scale, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
         mid = self.height() / 2
-        count = 17
+        levels = self.live_levels
+        count = len(levels) if levels is not None else 17
         step = self.width() / (count + 1)
         for i in range(count):
-            envelope = 0.28 + 0.72 * abs(math.sin(i * 0.39 + self.phase * 0.2))
-            wave = abs(math.sin(i * 0.74 + self.phase))
-            half = 2 + envelope * wave * (self.height() * 0.42)
+            if levels is None:
+                envelope = 0.28 + 0.72 * abs(math.sin(i * 0.39 + self.phase * 0.2))
+                wave = abs(math.sin(i * 0.74 + self.phase))
+                half = 2 + envelope * wave * (self.height() * 0.42)
+            else:
+                half = 2 + levels[i] * (self.height() * 0.42)
             x = step * (i + 1)
             p.drawLine(QPointF(x, mid - half), QPointF(x, mid + half))
         p.end()
@@ -293,6 +368,8 @@ class Overlay(QWidget):
                          Qt.WindowType.WindowStaysOnTopHint |
                          Qt.WindowType.WindowDoesNotAcceptFocus)
         self.theme = theme
+        self.positioning_supported = not (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+                                           or bool(os.environ.get('WAYLAND_DISPLAY')))
         self.saved_position = position
         self.position_changed = position_changed
         self.scale = max(0.5, min(2.0, int(scale_percent) / 100))
@@ -313,9 +390,16 @@ class Overlay(QWidget):
             f'letter-spacing: {round(self.scale)}px;')
         self.wave = Waveform(QColor(THEMES[theme]['accent']), self.scale)
         self.wave.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.cancel_button = QPushButton('×')
+        self.cancel_button.setObjectName('cancelRecording')
+        self.cancel_button.setAccessibleName('Cancel recording or transcription')
+        self.cancel_button.setToolTip('Cancel recording or transcription')
+        self.cancel_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.cancel_button.setFixedSize(round(22 * self.scale), round(22 * self.scale))
         self.layout.addWidget(self.dot)
         self.layout.addWidget(self.label)
         self.layout.addWidget(self.wave, 1)
+        self.layout.addWidget(self.cancel_button)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.wave.advance)
         self.timer.start(40)
@@ -333,6 +417,11 @@ class Overlay(QWidget):
             f'color: {foreground}; font-size: {round(9 * self.scale)}px; '
             f'font-weight: 700; letter-spacing: {round(self.scale)}px;')
         self.wave.color = QColor(colors['accent'])
+        self.cancel_button.setStyleSheet(
+            f'QPushButton {{ background: transparent; color: {foreground}; border: none; '
+            f'border-radius: {round(11 * self.scale)}px; padding: 0; '
+            f'font-size: {round(18 * self.scale)}px; font-weight: 400; }} '
+            f'QPushButton:hover {{ background: {colors["raised"]}; }}')
         self.update()
 
     def apply_scale(self, scale_percent):
@@ -343,8 +432,9 @@ class Overlay(QWidget):
         self.layout.setSpacing(round(8 * self.scale))
         self.wave.scale = self.scale
         self.wave.setMinimumSize(round(76 * self.scale), round(24 * self.scale))
+        self.cancel_button.setFixedSize(round(22 * self.scale), round(22 * self.scale))
         self.apply_theme(self.theme)
-        if self.position_initialized:
+        if self.position_initialized and self.positioning_supported:
             clamped = self.clamp_position(position)
             self.move(clamped)
             if clamped != position:
@@ -362,6 +452,9 @@ class Overlay(QWidget):
         painter.end()
 
     def show_bottom_center(self):
+        if not self.positioning_supported:
+            self.show()
+            return
         if not self.position_initialized:
             position = self.saved_position
             if isinstance(position, dict) and all(k in position for k in ('x', 'y')):
@@ -406,7 +499,20 @@ class Overlay(QWidget):
         return QPoint(max(area.left(), min(position.x(), max_x)),
                       max(area.top(), min(position.y(), max_y)))
 
+    def keep_on_screen(self, *_args):
+        if not self.positioning_supported or not self.position_initialized:
+            return
+        current = self.pos()
+        clamped = self.clamp_position(current)
+        if clamped != current:
+            self.move(clamped)
+            self.saved_position = {'x': clamped.x(), 'y': clamped.y()}
+            if self.position_changed:
+                self.position_changed(self.saved_position)
+
     def reset_position(self):
+        if not self.positioning_supported:
+            return
         self.saved_position = None
         self.position_initialized = True
         self.move(self.clamp_position(self.bottom_center_position()))
@@ -414,6 +520,8 @@ class Overlay(QWidget):
             self.position_changed(None)
 
     def mousePressEvent(self, event):
+        if not self.positioning_supported:
+            return super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
@@ -421,6 +529,8 @@ class Overlay(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if not self.positioning_supported:
+            return super().mouseMoveEvent(event)
         if self.drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
             desired = event.globalPosition().toPoint() - self.drag_offset
             self.move(self.clamp_position(desired))
@@ -429,6 +539,8 @@ class Overlay(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if not self.positioning_supported:
+            return super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton and self.drag_offset is not None:
             self.drag_offset = None
             self.position_initialized = True
@@ -480,8 +592,32 @@ class MainWindow(QMainWindow):
 
         card = QFrame()
         card.setObjectName('card')
-        form = QFormLayout(card)
-        self.form_layout = form
+        columns = QHBoxLayout(card)
+        self.column_layout = columns
+        self.column_forms = []
+        self.column_widgets = []
+
+        def make_column(title_text):
+            column = QFrame()
+            column.setObjectName('settingsColumn')
+            column.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                 QSizePolicy.Policy.Preferred)
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            title = QLabel(title_text)
+            title.setObjectName('sectionTitle')
+            column_layout.addWidget(title)
+            form = QFormLayout()
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            column_layout.addLayout(form)
+            columns.addWidget(column, 1, Qt.AlignmentFlag.AlignTop)
+            self.column_forms.append(form)
+            self.column_widgets.append(column)
+            return form
+
+        input_form = make_column('INPUT & APPEARANCE')
+        model_form = make_column('TRANSCRIPTION & INDICATOR')
         self.model = QComboBox()
         self.all_models = read_models()
         self.models = [(label, model_id) for label, model_id in self.all_models
@@ -527,41 +663,56 @@ class MainWindow(QMainWindow):
         self.shortcut.setToolTip('Press the keys you want to use. Meta is the Super key on Linux.')
         self.audio_source = QComboBox()
         self.audio_refresh = QPushButton('Refresh')
+        self.audio_meter_toggle = QPushButton('Monitor input')
+        self.audio_meter_toggle.setCheckable(True)
         audio_row = QWidget()
         audio_layout = QHBoxLayout(audio_row)
         audio_layout.setContentsMargins(0, 0, 0, 0)
         audio_layout.setSpacing(8)
         audio_layout.addWidget(self.audio_source, 1)
-        audio_layout.addWidget(self.audio_refresh)
         self.theme_toggle = QPushButton()
         self.theme_toggle.setObjectName('themeToggle')
         self.theme_toggle.setCheckable(True)
         self.theme_toggle.setChecked(self.settings['theme'] == 'dark')
         self.update_theme_button()
-        form.addRow('Model', self.model)
-        form.addRow('', self.check_models_button)
-        form.addRow('Model files', model_files_row)
-        form.addRow('Microphone', audio_row)
+        model_form.addRow('Model', self.model)
+        model_form.addRow(self.check_models_button)
+        model_form.addRow('Model files', model_files_row)
+        model_form.addRow('Language', self.language)
+        input_form.addRow('Microphone', audio_row)
+        audio_actions = QWidget()
+        audio_actions_layout = QHBoxLayout(audio_actions)
+        audio_actions_layout.setContentsMargins(0, 0, 0, 0)
+        audio_actions_layout.addWidget(self.audio_refresh)
+        audio_actions_layout.addWidget(self.audio_meter_toggle, 1)
+        input_form.addRow(audio_actions)
         self.audio_level = QProgressBar()
         self.audio_level.setRange(0, 100)
         self.audio_level.setValue(0)
         self.audio_level.setFormat('%p%')
-        self.audio_level_text = QLabel('Meter starts while Settings is open')
+        self.audio_level_text = QLabel('Microphone stays idle until monitoring or recording starts.')
         self.audio_level_text.setObjectName('muted')
-        form.addRow('Input level', self.audio_level)
-        form.addRow('', self.audio_level_text)
-        form.addRow('Language', self.language)
-        form.addRow('Shortcut', self.shortcut)
-        form.addRow('Theme', self.theme_toggle)
+        input_form.addRow('Input level', self.audio_level)
+        input_form.addRow(self.audio_level_text)
+        input_form.addRow('Shortcut', self.shortcut)
+        input_form.addRow('Theme', self.theme_toggle)
         self.scale_selector = QComboBox()
         for percent in (75, 100, 125, 150):
             self.scale_selector.addItem(f'{percent}%', percent)
         nearest_scale = normalized_scale(self.settings.get('scale_percent', 100))
         self.scale_selector.setCurrentIndex(self.scale_selector.findData(nearest_scale))
-        form.addRow('UI scale', self.scale_selector)
+        input_form.addRow('UI scale', self.scale_selector)
         self.reset_overlay = QPushButton('Reset to bottom-center')
         self.reset_overlay.setObjectName('secondary')
-        form.addRow('Indicator position', self.reset_overlay)
+        wayland_session = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+                           or bool(os.environ.get('WAYLAND_DISPLAY')))
+        self.reset_overlay.setEnabled(not wayland_session)
+        model_form.addRow('Indicator position', self.reset_overlay)
+        if wayland_session:
+            position_note = QLabel('The Wayland compositor chooses top-level window placement; dragging and saved positioning are unavailable.')
+            position_note.setObjectName('muted')
+            position_note.setWordWrap(True)
+            model_form.addRow(position_note)
         layout.addWidget(card)
 
         self.hotkey = QLabel()
@@ -573,13 +724,11 @@ class MainWindow(QMainWindow):
         self.message = QLabel('Saved')
         self.message.setObjectName('muted')
         self.message.setWordWrap(True)
-        layout.addWidget(self.message)
-
         buttons = QHBoxLayout()
         self.toggle = QPushButton('Stop Whisper' if service_running() else 'Start Whisper')
         self.toggle.setObjectName('secondary')
         buttons.addWidget(self.toggle)
-        buttons.addStretch(1)
+        buttons.addWidget(self.message, 1)
         layout.addLayout(buttons)
         self.setCentralWidget(root)
         self.toggle.clicked.connect(self.toggle_service)
@@ -590,6 +739,7 @@ class MainWindow(QMainWindow):
         self.scale_selector.currentIndexChanged.connect(self.scale_changed)
         self.audio_source.currentIndexChanged.connect(self.audio_source_changed)
         self.audio_refresh.clicked.connect(self.refresh_audio_sources)
+        self.audio_meter_toggle.toggled.connect(self.monitor_input_changed)
         self.shortcut.keySequenceChanged.connect(self.shortcut_changed)
         self.theme_toggle.clicked.connect(self.toggle_theme)
         self.reset_overlay.clicked.connect(self.app.reset_overlay_position)
@@ -912,31 +1062,40 @@ class MainWindow(QMainWindow):
         self.audio_source.setCurrentIndex(max(0, selected_index))
         self.audio_source.blockSignals(False)
         if not devices:
-            self.audio_level_text.setText('No microphone sources found; check PipeWire and pactl.')
+            self.audio_level_text.setText('No microphone sources found. Check the audio server and recording permissions.')
         elif self.audio_meter_process.state() == QProcess.ProcessState.NotRunning:
-            self.audio_level_text.setText('Live level appears while Settings is open.')
+            self.audio_level_text.setText('Microphone stays idle until monitoring or recording starts.')
 
     def audio_source_changed(self, _index):
         source = self.audio_source.currentData() or ''
         self.settings['audio_source'] = source
         self.app.settings['audio_source'] = source
         self.schedule_save()
-        if self.isVisible():
+        if self.audio_meter_toggle.isChecked():
             self.start_audio_meter()
+
+    def monitor_input_changed(self, enabled):
+        if enabled:
+            self.audio_meter_toggle.setText('Stop monitoring')
+            self.start_audio_meter()
+        else:
+            self.audio_meter_toggle.setText('Monitor input')
+            self.stop_audio_meter()
 
     def start_audio_meter(self):
         if self.audio_meter_process.state() != QProcess.ProcessState.NotRunning:
             self.audio_meter_process.terminate()
             self.audio_meter_process.waitForFinished(500)
         source = self.audio_source.currentData()
-        command = []
-        if source:
-            command.extend(['--target', str(source)])
-        command.extend(['--rate', '16000', '--channels', '1', '--format', 's16', '--raw', '-'])
+        try:
+            command = AudioBackend.detect().meter_command(source, 16000, 1)
+        except AudioBackendError as exc:
+            self.audio_level_text.setText(str(exc))
+            return
         self.audio_meter_buffer.clear()
         self.audio_level.setValue(0)
         self.audio_level_text.setText('Listening for microphone level…')
-        self.audio_meter_process.start('pw-record', command)
+        self.audio_meter_process.start(command[0], command[1:])
 
     def stop_audio_meter(self):
         if self.audio_meter_process.state() != QProcess.ProcessState.NotRunning:
@@ -945,7 +1104,7 @@ class MainWindow(QMainWindow):
                 self.audio_meter_process.kill()
                 self.audio_meter_process.waitForFinished(500)
         self.audio_level.setValue(0)
-        self.audio_level_text.setText('Meter starts while Settings is open.')
+        self.audio_level_text.setText('Microphone stays idle until monitoring or recording starts.')
 
     def read_audio_meter(self):
         self.audio_meter_buffer.extend(bytes(self.audio_meter_process.readAllStandardOutput()))
@@ -967,9 +1126,12 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.start_audio_meter()
 
     def hideEvent(self, event):
+        self.audio_meter_toggle.blockSignals(True)
+        self.audio_meter_toggle.setChecked(False)
+        self.audio_meter_toggle.setText('Monitor input')
+        self.audio_meter_toggle.blockSignals(False)
         self.stop_audio_meter()
         super().hideEvent(event)
 
@@ -1001,14 +1163,37 @@ class MainWindow(QMainWindow):
 
     def apply_scale(self):
         self.scale_factor = self.scale_selector.currentData() / 100
-        self.setFixedWidth(round(430 * self.scale_factor))
+        self.setFixedWidth(round(900 * self.scale_factor))
         self.root_layout.setContentsMargins(*(
-            round(n * self.scale_factor) for n in (26, 24, 26, 22)))
-        self.root_layout.setSpacing(round(18 * self.scale_factor))
-        self.form_layout.setContentsMargins(*(
-            round(n * self.scale_factor) for n in (16, 14, 16, 14)))
-        self.form_layout.setVerticalSpacing(round(13 * self.scale_factor))
+            round(n * self.scale_factor) for n in (24, 20, 24, 18)))
+        self.root_layout.setSpacing(round(14 * self.scale_factor))
+        self.column_layout.setContentsMargins(*(
+            round(n * self.scale_factor) for n in (40, 36, 40, 36)))
+        self.column_layout.setSpacing(round(28 * self.scale_factor))
+        for index, column in enumerate(self.column_widgets):
+            column.layout().setContentsMargins(*(
+                round(value * self.scale_factor) for value in
+                (18, 17 if index == 1 else 18, 18, 18)))
+        for form in self.column_forms:
+            form.setVerticalSpacing(round(10 * self.scale_factor))
+            form.setHorizontalSpacing(round(12 * self.scale_factor))
         self.apply_theme()
+        for column in self.column_widgets:
+            column.setMinimumHeight(0)
+            column.layout().activate()
+            column.updateGeometry()
+        panel_height = max(column.sizeHint().height()
+                           for column in self.column_widgets)
+        for column in self.column_widgets:
+            column.setMinimumHeight(panel_height)
+        # Updating font and layout metrics does not resize an already visible
+        # QMainWindow. Recompute the content hint so scale-downs shrink the
+        # window vertically as well as horizontally.
+        central = self.centralWidget()
+        if central is not None:
+            central.layout().activate()
+            central.adjustSize()
+        self.adjustSize()
 
     def schedule_save(self, delay=350):
         self.message.setText('Saving…')
@@ -1052,16 +1237,20 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background: {c['window']}; color: {c['text']}; font-size: {px(13)}px; }}
             QLabel#title {{ font-size: {px(24)}px; font-weight: 700; }}
+            QLabel#sectionTitle {{ color: {c['muted']}; font-size: {px(10)}px; font-weight: 700; letter-spacing: {px(1)}px; }}
             QLabel#muted {{ color: {c['muted']}; }}
             QLabel#badge {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(12)}px; padding: {px(7)}px {px(10)}px; color: {c['text']}; font-size: {px(11)}px; }}
             QFrame#card {{ background: {c['panel']}; border: 1px solid {c['line']}; border-radius: {px(14)}px; }}
-            QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(190)}px; }}
+            QFrame#settingsColumn {{ background: {c['window']}; border: 1px solid {c['line']}; border-radius: {px(12)}px; }}
+            QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(160)}px; }}
+            QComboBox::drop-down {{ width: 0px; border: none; }}
+            QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; }}
             QComboBox QAbstractItemView {{ background: {c['panel']}; selection-background-color: {c['accent']}; selection-color: {c['accent_text']}; }}
             QKeySequenceEdit {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(7)}px {px(9)}px; min-width: {px(190)}px; }}
             QProgressBar {{ border: 1px solid {c['line']}; border-radius: {px(5)}px; padding: {px(1)}px; height: {px(14)}px; background: {c['raised']}; text-align: center; }}
             QProgressBar::chunk {{ background: {c['accent']}; border-radius: {px(4)}px; }}
             QLabel#hotkey {{ color: {c['muted']}; padding: {px(4)}px {px(2)}px; }}
-            QPushButton {{ border: 1px solid {c['line']}; border-radius: {px(9)}px; padding: {px(10)}px {px(14)}px; font-weight: 600; }}
+            QPushButton {{ border: 1px solid {c['line']}; border-radius: {px(9)}px; padding: {px(9)}px {px(12)}px; min-height: {px(18)}px; font-weight: 600; }}
             QPushButton#primary {{ background: {c['accent']}; color: {c['accent_text']}; border-color: {c['accent']}; }}
             QPushButton#secondary {{ background: {c['raised']}; }}
             QPushButton#themeToggle {{ background: {c['raised']}; min-width: {px(190)}px; text-align: left; }}
@@ -1141,7 +1330,14 @@ class Controller:
         self.overlay = Overlay(self.settings['theme'], self.settings.get('overlay_position'),
                                self.overlay_position_changed,
                                self.settings.get('scale_percent', 100))
-        self.tray = QSystemTrayIcon(make_icon(self.settings['theme']), app)
+        self.overlay.cancel_button.clicked.connect(self.cancel_active_operation)
+        for screen in app.screens():
+            screen.geometryChanged.connect(self.overlay.keep_on_screen)
+            screen.availableGeometryChanged.connect(self.overlay.keep_on_screen)
+        app.screenAdded.connect(self.screen_added)
+        app.screenRemoved.connect(self.overlay.keep_on_screen)
+        self.tray = (QSystemTrayIcon(make_icon(self.settings['theme']), app)
+                     if QSystemTrayIcon.isSystemTrayAvailable() else None)
         self.menu = QMenu()
         self.status_action = self.menu.addAction('Minimal Whisper: checking…')
         self.status_action.setEnabled(False)
@@ -1150,20 +1346,34 @@ class Controller:
         self.toggle_action = self.menu.addAction('Stop Whisper')
         self.menu.addSeparator()
         self.quit_action = self.menu.addAction('Quit tray app')
-        self.tray.setContextMenu(self.menu)
-        self.tray.setToolTip('Minimal Whisper · checking status')
-        self.tray.activated.connect(self.tray_activated)
+        if self.tray:
+            self.tray.setContextMenu(self.menu)
+            self.tray.setToolTip('Minimal Whisper · checking status')
+            self.tray.activated.connect(self.tray_activated)
         self.settings_action.triggered.connect(self.show_settings)
         self.toggle_action.triggered.connect(self.toggle_service)
         self.quit_action.triggered.connect(app.quit)
-        self.tray.show()
+        if self.tray:
+            self.tray.show()
         self.last_state = None
+        # The status file can still say "transcribing" briefly after SIGUSR1
+        # is sent. Keep an explicitly cancelled overlay dismissed until the
+        # listener acknowledges cancellation by leaving an active state.
+        self.overlay_dismissed_for_active_state = False
         self.timer = QTimer(app)
         self.timer.timeout.connect(self.refresh_status)
         self.timer.start(1000)
+        self.waveform_timer = QTimer(app)
+        self.waveform_timer.timeout.connect(self.refresh_waveform)
+        self.waveform_timer.start(60)
         self.refresh_status()
         if open_settings:
             self.show_settings()
+
+    def screen_added(self, screen):
+        screen.geometryChanged.connect(self.overlay.keep_on_screen)
+        screen.availableGeometryChanged.connect(self.overlay.keep_on_screen)
+        QTimer.singleShot(0, self.overlay.keep_on_screen)
 
     def tray_activated(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
@@ -1190,8 +1400,36 @@ class Controller:
     def reset_overlay_position(self):
         self.overlay.reset_position()
 
+    def cancel_active_operation(self):
+        try:
+            pid = int(PTT_PID.read_text(encoding='ascii').strip())
+            command = Path('/proc', str(pid), 'cmdline').read_bytes()
+            if b'minimal-whisper-ptt.py' not in command:
+                raise RuntimeError('The listener process could not be verified.')
+            os.kill(pid, signal.SIGUSR1)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.window.message.setText(f'Could not cancel the current task: {exc}')
+            return
+        self.overlay_dismissed_for_active_state = True
+        self.window.message.setText('Cancelled; Whisper is ready for the next recording.')
+        self.overlay.wave.set_live_levels(None)
+        self.overlay.hide()
+
+    def refresh_waveform(self):
+        if not self.overlay.isVisible():
+            return
+        current = read_json(STATE, {'state': 'stopped'})
+        state = current.get('state')
+        if state not in ('recording', 'transcribing'):
+            self.overlay.wave.set_live_levels(None)
+            self.overlay.hide()
+        else:
+            self.overlay.wave.set_live_levels(
+                current.get('waveform') if state == 'recording' else None)
+
     def refresh_theme(self):
-        self.tray.setIcon(make_icon(self.settings['theme']))
+        if self.tray:
+            self.tray.setIcon(make_icon(self.settings['theme']))
         self.window.settings = self.settings
         self.window.setWindowIcon(make_icon(self.settings['theme']))
         self.window.apply_theme()
@@ -1206,7 +1444,9 @@ class Controller:
         elif running and state == 'stopped':
             state = 'listening'
         visible_state = state in ('recording', 'transcribing')
-        if visible_state:
+        if not visible_state:
+            self.overlay_dismissed_for_active_state = False
+        if visible_state and not self.overlay_dismissed_for_active_state:
             new_text = 'TRANSCRIBING' if state == 'transcribing' else 'LISTENING'
             if self.overlay.label.text() != new_text:
                 self.overlay.label.setText(new_text)
@@ -1218,9 +1458,13 @@ class Controller:
             self.overlay.label.setText('LISTENING')
 
         label = {'recording': 'Recording', 'transcribing': 'Transcribing',
+                 'delivering': 'Delivering',
                  'listening': 'Ready', 'error': 'Needs attention',
                  'stopped': 'Stopped'}.get(state, state.title())
         badge = f'●  {label}'
+        detail = current.get('detail', '')
+        if state == 'listening' and detail.startswith('Copied transcription'):
+            badge += ' · copied to clipboard; paste it yourself'
         self.window.state_badge.setText(badge)
         self.window.update_service_controls(running)
         self.menu.actions()[0].setText(f'Minimal Whisper: {label}')
@@ -1229,15 +1473,15 @@ class Controller:
         self.toggle_action.setText('Model downloading' if blocked else
                                    ('Stop Whisper' if running else 'Start Whisper'))
         model = current.get('model', self.settings['model'])
-        self.tray.setToolTip(f'Minimal Whisper · {label} · {model}')
+        if self.tray:
+            tooltip = f'Minimal Whisper · {label} · {model}'
+            if state == 'listening' and detail.startswith('Copied transcription'):
+                tooltip += ' · clipboard ready to paste'
+            self.tray.setToolTip(tooltip)
 
 
 def main():
-    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
-        print('Minimal Whisper supports X11 only; Wayland is not supported.', file=sys.stderr)
-        return 2
     open_settings = '--background' not in sys.argv
-    os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
     app = QApplication(sys.argv)
     app.setApplicationName('Minimal Whisper')
     app.setQuitOnLastWindowClosed(False)
@@ -1254,9 +1498,18 @@ def main():
         print(f'Could not create the Minimal Whisper instance socket: {server.errorString()}',
               file=sys.stderr)
         return 1
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        print('No system tray is available in this desktop session.', file=sys.stderr)
     controller = Controller(app, open_settings)
+    CONTROL_PID.parent.mkdir(parents=True, exist_ok=True)
+    CONTROL_PID.write_text(f'{os.getpid()}\n', encoding='ascii')
+
+    def remove_pidfile():
+        try:
+            if int(CONTROL_PID.read_text(encoding='ascii').strip()) == os.getpid():
+                CONTROL_PID.unlink()
+        except (OSError, ValueError):
+            pass
+
+    app.aboutToQuit.connect(remove_pidfile)
 
     def receive_request():
         while server.hasPendingConnections():
