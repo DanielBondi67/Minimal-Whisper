@@ -581,8 +581,8 @@ class MainWindow(QMainWindow):
             self.column_forms.append(form)
             return form
 
-        model_form = make_column('TRANSCRIPTION')
         input_form = make_column('INPUT & APPEARANCE')
+        model_form = make_column('TRANSCRIPTION')
         self.model = QComboBox()
         self.all_models = read_models()
         self.models = [(label, model_id) for label, model_id in self.all_models
