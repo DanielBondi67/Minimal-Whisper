@@ -41,7 +41,7 @@ The model list is `config/models.json`; a user override can be placed at `${XDG_
 "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv/bin/python" -c 'import whisper; print("\n".join(whisper.available_models()))'
 ```
 
-Use an exact returned ID in the JSON `model` field. The UI verifies cached model checksums and marks installed models with a tick; select an installed model and click **Uninstall model** to remove its cache file. **Check for new models** scans the installed Whisper package; update `openai-whisper` first to discover IDs added by a newer release. New IDs are saved to the user model list. Downloads only begin when you click **Download model**. Language options are in `config/languages.json` and can be overridden at `${XDG_CONFIG_HOME:-$HOME/.config}/minimal-whisper/languages.json`.
+Use an exact returned ID in the JSON `model` field. The UI verifies cached model checksums and marks installed models with a tick; select an installed model and click **Uninstall model** to remove its cache file. **Check for new models** scans the installed Whisper package; update `openai-whisper` first to discover IDs added by a newer release. New IDs are saved to the user model list. Downloads only begin when you click **Download model**. Interrupted downloads retain a partial file and resume from the saved byte offset the next time you click **Download model**; the completed checkpoint is checksum-verified before use. If Whisper was running when you selected an uninstalled model, it pauses for the download and starts again with that model after the download completes. Language options are in `config/languages.json` and can be overridden at `${XDG_CONFIG_HOME:-$HOME/.config}/minimal-whisper/languages.json`.
 
 ## Remove
 

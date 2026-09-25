@@ -759,7 +759,6 @@ class MainWindow(QMainWindow):
         self.model_cache_rescan_requested = False
         self.downloading_model = None
         self.resume_listener_after_model_change = False
-        self.resume_from_model = None
         self.audio_meter_process = QProcess(self)
         self.audio_meter_process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
         self.audio_meter_process.readyReadStandardOutput.connect(self.read_audio_meter)
@@ -783,6 +782,29 @@ class MainWindow(QMainWindow):
         self.update_model_status()
         self.update_service_controls(service_running())
         self.schedule_save()
+
+    def model_is_installed(self, model_id):
+        if not model_id:
+            return False
+        if model_id in self.verified_models:
+            return True
+        path = Path(model_id)
+        return path.is_absolute() and path.is_file()
+
+    def resume_listener_for_selected_model(self):
+        model_id = self.model.currentData()
+        if (not self.resume_listener_after_model_change
+                or not self.model_is_installed(model_id)
+                or self.selected_model_is_downloading()):
+            return False
+        result = service_action('start', background=True)
+        if isinstance(result, Exception) or result.returncode:
+            detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
+            self.message.setText(f'Saved, but Whisper could not resume: {detail or "unknown error"}')
+        else:
+            self.resume_listener_after_model_change = False
+            self.message.setText('Whisper is resuming with the selected model.')
+        return True
 
     def selected_model_is_downloading(self):
         return (self.model_download_process.state() != QProcess.ProcessState.NotRunning
@@ -843,6 +865,8 @@ class MainWindow(QMainWindow):
         self.update_model_status()
         if self.model_cache_rescan_requested:
             QTimer.singleShot(100, self.refresh_model_cache)
+        else:
+            self.resume_listener_for_selected_model()
 
     def check_for_new_models(self):
         if not self.whisper_python:
@@ -982,9 +1006,8 @@ class MainWindow(QMainWindow):
             self.model_status.setText('This model cannot be downloaded by the installed Whisper version.')
             return
         self.downloading_model = model_id
-        self.resume_listener_after_model_change = service_running()
-        self.resume_from_model = model_id if self.resume_listener_after_model_change else None
-        if self.resume_listener_after_model_change:
+        if service_running():
+            self.resume_listener_after_model_change = True
             service_action('stop', background=True)
         self.model_download_progress.setValue(0)
         self.model_download_progress.show()
@@ -1047,10 +1070,20 @@ class MainWindow(QMainWindow):
         self.model_download_progress.hide()
         if exit_code == 0:
             self.model_catalog_status.setText(f'Downloaded {model_id}; verifying checkpoint…')
+            info = self.whisper_model_info.get(model_id)
+            if info:
+                aliases = {name for name, metadata in self.whisper_model_info.items()
+                           if metadata['file'] == info['file']}
+                self.verified_models.update(aliases)
+                self.update_model_marks()
             self.refresh_model_cache()
         else:
             self.model_catalog_status.setText(
-                f'Download of {model_id} was cancelled or failed; it is not available yet.')
+                f'Download of {model_id} was cancelled or failed; retry to resume it.')
+
+        if not self.resume_listener_for_selected_model() and self.resume_listener_after_model_change:
+            self.message.setText(
+                'Whisper is paused; choose an installed model or finish its download to resume.')
         self.update_model_status()
         self.update_service_controls(service_running())
 
@@ -1284,17 +1317,22 @@ class MainWindow(QMainWindow):
         )
         running = service_running()
         selected_downloading = self.selected_model_is_downloading()
-        restart_for_selection = (self.resume_listener_after_model_change
-                                 and updated['model'] != self.resume_from_model
-                                 and not selected_downloading)
         was_running = listener_settings_changed and running
+        selected_needs_download = (
+            updated['model'] in self.whisper_model_info
+            and not self.model_is_installed(updated['model']))
         if selected_downloading:
             if running:
+                self.resume_listener_after_model_change = True
                 service_action('stop', background=True)
             self.message.setText('Choose another model while this download is in progress.')
+        elif was_running and selected_needs_download:
+            self.resume_listener_after_model_change = True
+            service_action('stop', background=True)
+            self.message.setText(
+                f'Whisper is paused. Download {updated["model"]} to resume with it.')
         elif was_running:
             self.resume_listener_after_model_change = False
-            self.resume_from_model = None
             self.message.setText('Applying in background…')
             result = service_action('restart', background=True)
             if isinstance(result, Exception) or result.returncode:
@@ -1302,16 +1340,9 @@ class MainWindow(QMainWindow):
                 self.message.setText(f'Saved, but could not apply: {detail or "unknown error"}')
             else:
                 self.message.setText('Saved; Whisper is restarting in the background.')
-        elif restart_for_selection:
-            result = service_action('start', background=True)
-            self.resume_listener_after_model_change = False
-            self.resume_from_model = None
-            self.message.setText('Saved; Whisper is starting with the selected model.')
-            if isinstance(result, Exception) or result.returncode:
-                detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
-                self.message.setText(f'Saved, but could not start Whisper: {detail or "unknown error"}')
         else:
-            self.message.setText('Saved')
+            if not self.resume_listener_for_selected_model():
+                self.message.setText('Saved')
         self.app.refresh_theme()
         self.app.refresh_status()
         self.update_service_controls(service_running())
