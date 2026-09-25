@@ -1,8 +1,11 @@
 import subprocess
+import io
+import struct
 import unittest
 from unittest.mock import patch
 
 from src.audio_backend import AudioBackend, PipeWireBackend, PulseAudioBackend
+from src.audio_waveform import pcm_waveform_levels, wav_data_offset
 from src.text_output import normalize_transcription
 from src.wayland_portal import PortalError, _portal_trigger
 
@@ -21,6 +24,23 @@ class AudioBackendTests(unittest.TestCase):
         self.assertIn('--file-format=wav', command)
         self.assertIn('--device', command)
         self.assertEqual(command[-1], '/tmp/input.wav')
+
+    def test_waveform_levels_respond_to_pcm_amplitude(self):
+        quiet = struct.pack('<' + 'h' * 34, *([1024] * 34))
+        loud = struct.pack('<' + 'h' * 34, *([16384] * 34))
+        silence = bytes(68)
+        self.assertEqual(pcm_waveform_levels(silence), [0.0] * 17)
+        self.assertEqual(len(pcm_waveform_levels(quiet)), 17)
+        self.assertGreater(pcm_waveform_levels(loud)[0],
+                           pcm_waveform_levels(quiet)[0])
+
+    def test_finds_pcm_data_chunk_after_wave_header(self):
+        stream = io.BytesIO(
+            b'RIFF' + struct.pack('<I', 36) + b'WAVE' +
+            b'fmt ' + struct.pack('<I', 16) +
+            struct.pack('<HHIIHH', 1, 1, 16000, 32000, 2, 16) +
+            b'data' + struct.pack('<I', 0))
+        self.assertEqual(wav_data_offset(stream), 44)
 
     @patch('src.audio_backend.shutil.which')
     @patch('src.audio_backend.subprocess.run')

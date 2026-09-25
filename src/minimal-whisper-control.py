@@ -322,11 +322,24 @@ class Waveform(QWidget):
         self.color = color
         self.scale = scale
         self.phase = 0.0
+        self.live_levels = None
         self.setMinimumSize(round(76 * scale), round(24 * scale))
 
     def advance(self):
         self.phase += 0.24
         self.update()
+
+    def set_live_levels(self, levels):
+        if not isinstance(levels, list) or not levels:
+            normalized = None
+        else:
+            try:
+                normalized = tuple(max(0.0, min(1.0, float(level))) for level in levels)
+            except (TypeError, ValueError):
+                normalized = None
+        if normalized != self.live_levels:
+            self.live_levels = normalized
+            self.update()
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -334,12 +347,16 @@ class Waveform(QWidget):
         p.setPen(QPen(self.color, 2.2 * self.scale, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
         mid = self.height() / 2
-        count = 17
+        levels = self.live_levels
+        count = len(levels) if levels is not None else 17
         step = self.width() / (count + 1)
         for i in range(count):
-            envelope = 0.28 + 0.72 * abs(math.sin(i * 0.39 + self.phase * 0.2))
-            wave = abs(math.sin(i * 0.74 + self.phase))
-            half = 2 + envelope * wave * (self.height() * 0.42)
+            if levels is None:
+                envelope = 0.28 + 0.72 * abs(math.sin(i * 0.39 + self.phase * 0.2))
+                wave = abs(math.sin(i * 0.74 + self.phase))
+                half = 2 + envelope * wave * (self.height() * 0.42)
+            else:
+                half = 2 + levels[i] * (self.height() * 0.42)
             x = step * (i + 1)
             p.drawLine(QPointF(x, mid - half), QPointF(x, mid + half))
         p.end()
@@ -1328,6 +1345,9 @@ class Controller:
         self.timer = QTimer(app)
         self.timer.timeout.connect(self.refresh_status)
         self.timer.start(1000)
+        self.waveform_timer = QTimer(app)
+        self.waveform_timer.timeout.connect(self.refresh_waveform)
+        self.waveform_timer.start(60)
         self.refresh_status()
         if open_settings:
             self.show_settings()
@@ -1361,6 +1381,13 @@ class Controller:
 
     def reset_overlay_position(self):
         self.overlay.reset_position()
+
+    def refresh_waveform(self):
+        if not self.overlay.isVisible():
+            return
+        current = read_json(STATE, {'state': 'stopped'})
+        self.overlay.wave.set_live_levels(
+            current.get('waveform') if current.get('state') == 'recording' else None)
 
     def refresh_theme(self):
         if self.tray:

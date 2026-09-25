@@ -7,11 +7,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_backend import AudioBackend
+from audio_waveform import pcm_waveform_levels, wav_data_offset
 from text_output import normalize_transcription
 
 from Xlib import X, XK, display, error
@@ -85,10 +87,12 @@ def log(message):
         f.flush()
 
 
-def set_state(state, detail=''):
+def set_state(state, detail='', waveform=None):
     STATE.parent.mkdir(parents=True, exist_ok=True)
     payload = {'state': state, 'detail': detail, 'model': MODEL,
                'language': LANGUAGE, 'updated': time.time()}
+    if waveform is not None:
+        payload['waveform'] = waveform
     tmp = STATE.with_suffix('.tmp')
     try:
         tmp.write_text(json.dumps(payload), encoding='utf-8')
@@ -164,6 +168,8 @@ class Dictation:
         self.wav = None
         self.recorder = None
         self.pressed = False
+        self.waveform_stop = threading.Event()
+        self.waveform_thread = None
 
     def start(self):
         self.temp = tempfile.TemporaryDirectory(prefix='minimal-whisper-')
@@ -182,9 +188,38 @@ class Dictation:
         if self.recorder.poll() is not None:
             raise RuntimeError(f'{AudioBackend.detect().name} recorder exited before capture started; see {LOG}')
         self.pressed = True
-        set_state('recording')
+        self.waveform_stop = threading.Event()
+        set_state('recording', waveform=[0.0] * 17)
+        self.waveform_thread = threading.Thread(
+            target=self.monitor_waveform, args=(self.wav,), daemon=True)
+        self.waveform_thread.start()
         log(f'recording started model={MODEL}')
         notify('Recording', 'Release the shortcut to transcribe')
+
+    def monitor_waveform(self, wav):
+        offset = None
+        while not self.waveform_stop.wait(0.05):
+            try:
+                with wav.open('rb') as recording:
+                    if offset is None:
+                        offset = wav_data_offset(recording)
+                    if offset is None:
+                        continue
+                    recording.seek(offset)
+                    data = recording.read()
+                offset += len(data)
+                if len(data) > 3200:
+                    data = data[-3200:]
+                usable = len(data) & ~1
+                if usable:
+                    levels = pcm_waveform_levels(data[:usable])
+                else:
+                    levels = [0.0] * 17
+                set_state('recording', waveform=levels)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                log(f'could not read live recording waveform: {exc!r}')
 
     def stop_and_transcribe(self):
         proc, wav, temp = self.recorder, self.wav, self.temp
@@ -192,15 +227,20 @@ class Dictation:
         self.pressed = False
         if proc is None:
             return
+        self.waveform_stop.set()
         try:
             proc.send_signal(signal.SIGINT)
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.terminate()
             proc.wait(timeout=3)
+        if self.waveform_thread is not None:
+            self.waveform_thread.join(timeout=1)
+            self.waveform_thread = None
         if not wav.exists() or wav.stat().st_size < 2048:
             notify('No recording', 'No audio was captured. Check the default microphone source.')
             log('recording was empty or too short')
+            set_state('listening')
             temp.cleanup()
             return
 
@@ -289,6 +329,7 @@ class Dictation:
         proc, temp = self.recorder, self.temp
         self.recorder = self.wav = self.temp = None
         self.pressed = False
+        self.waveform_stop.set()
         if proc is not None and proc.poll() is None:
             proc.send_signal(signal.SIGINT)
             try:
@@ -296,6 +337,9 @@ class Dictation:
             except subprocess.TimeoutExpired:
                 proc.terminate()
                 proc.wait(timeout=2)
+        if self.waveform_thread is not None:
+            self.waveform_thread.join(timeout=1)
+            self.waveform_thread = None
         if temp is not None:
             temp.cleanup()
         set_state('stopped')
