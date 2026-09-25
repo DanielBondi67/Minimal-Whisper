@@ -1,5 +1,9 @@
 # Minimal Whisper
 
+<p align="center">
+  <img src="icons/minimal-whisper.svg" alt="Minimal Whisper logo" width="128" height="128">
+</p>
+
 Offline voice typing with OpenAI Whisper. The app includes settings, model downloads, microphone selection with a live level meter, a tray menu, and an X11 push-to-talk shortcut.
 
 ## Support
