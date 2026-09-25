@@ -1,5 +1,9 @@
 # Minimal Whisper
 
+<p align="center">
+  <img src="icons/minimal-whisper.svg" alt="Minimal Whisper logo" width="128" height="128">
+</p>
+
 Offline voice typing with OpenAI Whisper. It includes model downloads, microphone selection and level meter, an optional tray icon, and push-to-talk.
 
 ## Support
