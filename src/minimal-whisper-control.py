@@ -1115,6 +1115,14 @@ class MainWindow(QMainWindow):
             round(n * self.scale_factor) for n in (16, 14, 16, 14)))
         self.form_layout.setVerticalSpacing(round(13 * self.scale_factor))
         self.apply_theme()
+        # Updating font and layout metrics does not resize an already visible
+        # QMainWindow. Recompute the content hint so scale-downs shrink the
+        # window vertically as well as horizontally.
+        central = self.centralWidget()
+        if central is not None:
+            central.layout().activate()
+            central.adjustSize()
+        self.adjustSize()
 
     def schedule_save(self, delay=350):
         self.message.setText('Saving…')
