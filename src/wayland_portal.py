@@ -352,21 +352,29 @@ class RemoteKeyboardPortal:
             self.error = str(exc)
             self.session = None
 
-    def type_text(self, text):
+    def type_text(self, text, cancelled=None):
         if not self.session:
             return False
         try:
             client = _dbus()
             for character in text:
+                if cancelled and cancelled():
+                    return False
                 codepoint = ord(character)
                 keysym = codepoint if codepoint < 128 else 0x01000000 | codepoint
-                for state in (1, 0):
-                    def notify(iterator, key=keysym, pressed=state):
-                        client.basic(iterator, client.OBJECT_PATH, _path(self.session))
-                        client.vardict(iterator, {})
-                        client.basic(iterator, client.UINT32, key)
-                        client.basic(iterator, client.UINT32, pressed)
-                    client.call(REMOTE, 'NotifyKeyboardKeysym', notify)
+                def notify(iterator, pressed):
+                    client.basic(iterator, client.OBJECT_PATH, _path(self.session))
+                    client.vardict(iterator, {})
+                    client.basic(iterator, client.UINT32, keysym)
+                    client.basic(iterator, client.UINT32, pressed)
+                client.call(REMOTE, 'NotifyKeyboardKeysym',
+                            lambda iterator: notify(iterator, 1))
+                try:
+                    if cancelled and cancelled():
+                        return False
+                finally:
+                    client.call(REMOTE, 'NotifyKeyboardKeysym',
+                                lambda iterator: notify(iterator, 0))
             return True
         except PortalError as exc:
             self.error = str(exc)

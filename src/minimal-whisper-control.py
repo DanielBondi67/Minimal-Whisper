@@ -1414,8 +1414,13 @@ class Controller:
         if not self.overlay.isVisible():
             return
         current = read_json(STATE, {'state': 'stopped'})
-        self.overlay.wave.set_live_levels(
-            current.get('waveform') if current.get('state') == 'recording' else None)
+        state = current.get('state')
+        if state not in ('recording', 'transcribing'):
+            self.overlay.wave.set_live_levels(None)
+            self.overlay.hide()
+        else:
+            self.overlay.wave.set_live_levels(
+                current.get('waveform') if state == 'recording' else None)
 
     def refresh_theme(self):
         if self.tray:
@@ -1446,6 +1451,7 @@ class Controller:
             self.overlay.label.setText('LISTENING')
 
         label = {'recording': 'Recording', 'transcribing': 'Transcribing',
+                 'delivering': 'Delivering',
                  'listening': 'Ready', 'error': 'Needs attention',
                  'stopped': 'Stopped'}.get(state, state.title())
         badge = f'●  {label}'

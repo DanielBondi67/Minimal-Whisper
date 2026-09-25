@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from src.audio_backend import AudioBackend, PipeWireBackend, PulseAudioBackend
 from src.audio_waveform import pcm_waveform_levels, wav_data_offset
+from src.shortcut_cancel import ShortcutReleaseGate
 from src.text_output import normalize_transcription
 from src.wayland_portal import PortalError, _portal_trigger
 
@@ -67,6 +68,18 @@ class PortalShortcutTests(unittest.TestCase):
     def test_rejects_shortcut_without_modifier(self):
         with self.assertRaises(PortalError):
             _portal_trigger('y')
+
+
+class ShortcutCancelTests(unittest.TestCase):
+    def test_cancel_blocks_key_repeat_until_physical_release(self):
+        gate = ShortcutReleaseGate()
+        gate.cancel_held_shortcut(True)
+        self.assertFalse(gate.may_start())
+        self.assertFalse(gate.release(physically_down=True))
+        self.assertFalse(gate.may_start())
+        self.assertFalse(gate.release())
+        self.assertTrue(gate.may_start())
+        self.assertTrue(gate.release())
 
 
 class TextOutputTests(unittest.TestCase):

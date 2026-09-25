@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_backend import AudioBackend
 from audio_waveform import pcm_waveform_levels, wav_data_offset
+from shortcut_cancel import ShortcutReleaseGate
 from text_output import normalize_transcription
 
 from Xlib import X, XK, display, error
@@ -106,8 +107,10 @@ def notify(title, body):
     return None
 
 
-def insert_transcription(text):
+def insert_transcription(text, dictation):
     global KEYBOARD_PORTAL
+    if dictation.cancel_requested.is_set():
+        return None
     text = normalize_transcription(text)
     is_wayland = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
                   or bool(os.environ.get('WAYLAND_DISPLAY')))
@@ -118,11 +121,13 @@ def insert_transcription(text):
             if KEYBOARD_PORTAL is None:
                 from wayland_portal import RemoteKeyboardPortal
                 KEYBOARD_PORTAL = RemoteKeyboardPortal()
-            if KEYBOARD_PORTAL.type_text(text):
+            if KEYBOARD_PORTAL.type_text(text, cancelled=dictation.cancel_requested.is_set):
                 return 'typed through the Remote Desktop portal'
             portal_error = KEYBOARD_PORTAL.error or ''
         except Exception as exc:
             portal_error = str(exc)
+        if dictation.cancel_requested.is_set():
+            return None
         QGuiApplication.clipboard().setText(text)
         detail = 'Copied transcription to clipboard; paste it yourself.'
         if portal_error:
@@ -130,8 +135,24 @@ def insert_transcription(text):
         set_state('listening', detail)
         log(detail)
         return 'copied to clipboard for manual paste'
-    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
-                   check=True)
+    process = subprocess.Popen(
+        ['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
+        stdin=subprocess.DEVNULL)
+    dictation.typing_process = process
+    try:
+        while process.poll() is None:
+            if dictation.cancel_requested.wait(0.02):
+                if process.poll() is None:
+                    process.terminate()
+                break
+        return_code = process.wait()
+    finally:
+        if dictation.typing_process is process:
+            dictation.typing_process = None
+    if dictation.cancel_requested.is_set():
+        return None
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, process.args)
     return 'typed through the X11 backend'
 
 
@@ -168,6 +189,7 @@ class Dictation:
         self.wav = None
         self.recorder = None
         self.transcriber = None
+        self.typing_process = None
         self.pressed = False
         self.waveform_stop = threading.Event()
         self.waveform_thread = None
@@ -295,7 +317,12 @@ class Dictation:
                 log('transcription cancelled before text insertion')
                 set_state('listening')
                 return
-            output_method = insert_transcription(text)
+            set_state('delivering')
+            output_method = insert_transcription(text, self)
+            if output_method is None or self.cancel_requested.is_set():
+                log('text delivery cancelled')
+                set_state('listening')
+                return
             log(f'transcription delivered via {output_method} ({len(text)} characters)')
             notify('Done', 'Transcription inserted' if 'typed' in output_method
                    else 'Transcription copied; paste it yourself')
@@ -369,6 +396,15 @@ class Dictation:
                 transcriber.kill()
                 transcriber.wait(timeout=2)
         self.transcriber = None
+        typing_process = self.typing_process
+        if typing_process is not None and typing_process.poll() is None:
+            typing_process.terminate()
+            try:
+                typing_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                typing_process.kill()
+                typing_process.wait(timeout=2)
+        self.typing_process = None
         if temp is not None:
             temp.cleanup()
         set_state('stopped')
@@ -377,6 +413,7 @@ class Dictation:
     def cancel_current(self):
         self.cancel_requested.set()
         self.waveform_stop.set()
+        set_state('cancelling')
         proc, temp = self.recorder, self.temp
         if proc is not None:
             self.recorder = self.wav = self.temp = None
@@ -402,6 +439,14 @@ class Dictation:
             except subprocess.TimeoutExpired:
                 transcriber.kill()
                 transcriber.wait(timeout=2)
+        typing_process = self.typing_process
+        if typing_process is not None and typing_process.poll() is None:
+            typing_process.terminate()
+            try:
+                typing_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                typing_process.kill()
+                typing_process.wait(timeout=2)
         set_state('listening')
         log('current recording or transcription cancelled')
 
@@ -431,12 +476,14 @@ def main():
     set_state('listening')
     notify('Ready', f'Hold {SETTINGS["shortcut"]} to dictate')
     dictation = Dictation()
+    shortcut_gate = ShortcutReleaseGate()
 
     def handle_term(_signum, _frame):
         dictation.cancel()
         raise SystemExit(0)
 
     def handle_cancel(_signum, _frame):
+        shortcut_gate.cancel_held_shortcut(dictation.pressed)
         dictation.cancel_current()
 
     signal.signal(signal.SIGTERM, handle_term)
@@ -445,6 +492,8 @@ def main():
         while True:
             event = dpy.next_event()
             if event.type == X.KeyPress and event.detail == keycode:
+                if not shortcut_gate.may_start():
+                    continue
                 if not dictation.pressed:
                     try:
                         dictation.start()
@@ -452,12 +501,14 @@ def main():
                         log(f'recording error: {exc!r}')
                         set_state('error', str(exc))
                         notify('Recording error', str(exc))
-            elif event.type == X.KeyRelease and event.detail == keycode and dictation.pressed:
+            elif event.type == X.KeyRelease and event.detail == keycode:
                 # X11 synthesizes release/press pairs for autorepeat; ignore those while Y remains down.
                 keymap = dpy.query_keymap()
-                if keymap[keycode // 8] & (1 << (keycode % 8)):
+                physically_down = bool(keymap[keycode // 8] & (1 << (keycode % 8)))
+                if not shortcut_gate.release(physically_down):
                     continue
-                dictation.stop_and_transcribe()
+                if dictation.pressed:
+                    dictation.stop_and_transcribe()
     except KeyboardInterrupt:
         pass
     finally:
@@ -495,8 +546,11 @@ def main_wayland():
         set_state('error', message)
         return 2
     dictation = Dictation()
+    shortcut_gate = ShortcutReleaseGate()
 
     def pressed():
+        if not shortcut_gate.may_start():
+            return
         if not dictation.pressed:
             try:
                 dictation.start()
@@ -505,6 +559,8 @@ def main_wayland():
                 set_state('error', str(exc))
 
     def released():
+        if not shortcut_gate.release():
+            return
         if dictation.pressed:
             dictation.stop_and_transcribe()
 
@@ -519,6 +575,7 @@ def main_wayland():
         app.quit()
 
     def handle_cancel(_signum, _frame):
+        shortcut_gate.cancel_held_shortcut(dictation.pressed)
         dictation.cancel_current()
 
     signal.signal(signal.SIGTERM, handle_term)
