@@ -582,7 +582,7 @@ class MainWindow(QMainWindow):
             return form
 
         input_form = make_column('INPUT & APPEARANCE')
-        model_form = make_column('TRANSCRIPTION')
+        model_form = make_column('TRANSCRIPTION & INDICATOR')
         self.model = QComboBox()
         self.all_models = read_models()
         self.models = [(label, model_id) for label, model_id in self.all_models
@@ -672,12 +672,12 @@ class MainWindow(QMainWindow):
         wayland_session = (os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
                            or bool(os.environ.get('WAYLAND_DISPLAY')))
         self.reset_overlay.setEnabled(not wayland_session)
-        input_form.addRow('Indicator position', self.reset_overlay)
+        model_form.addRow('Indicator position', self.reset_overlay)
         if wayland_session:
             position_note = QLabel('The Wayland compositor chooses top-level window placement; dragging and saved positioning are unavailable.')
             position_note.setObjectName('muted')
             position_note.setWordWrap(True)
-            input_form.addRow(position_note)
+            model_form.addRow(position_note)
         layout.addWidget(card)
 
         self.hotkey = QLabel()
