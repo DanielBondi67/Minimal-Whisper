@@ -8,19 +8,19 @@ Supported: Arch Linux, XFCE, X11, PipeWire with WirePlumber and its PulseAudio-c
 
 ## Dependencies
 
-Arch packages: `python`, `python-pip`, `pipewire`, `pipewire-audio`, `pipewire-pulse`, `wireplumber`, `xclip`, `xdotool`, and `systemd`; `pavucontrol` is optional. Python packages: `PySide6`, `openai-whisper`, and `python-xlib` (listed in `requirements.txt`).
+Arch packages: `python`, `python-pip`, `pipewire`, `pipewire-audio`, `pipewire-pulse`, `wireplumber`, `xdotool`, and `systemd`; `pavucontrol` is optional. Python packages: `PySide6`, `openai-whisper`, and `python-xlib` (listed in `requirements.txt`).
 
 Install the Arch dependencies, then create the app’s Python environment and install its Python packages:
 
 ```bash
-sudo pacman -S python python-pip pipewire pipewire-audio pipewire-pulse wireplumber xclip xdotool
+sudo pacman -S python python-pip pipewire pipewire-audio pipewire-pulse wireplumber xdotool
 mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper"
 python -m venv "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv"
 "${XDG_DATA_HOME:-$HOME/.local/share}/minimal-whisper/venv/bin/pip" install -r requirements.txt
 ./install.sh
 ```
 
-Start **Minimal Whisper** from the application finder. In Settings, choose an input device and confirm the live meter responds, choose a model, and download it while online. Hold the configured shortcut to record and release it to transcribe. `pactl`, `pw-record`, `xclip`, `xdotool`, Python with PySide6, and a Whisper/Xlib Python environment are checked by the installer.
+Start **Minimal Whisper** from the application finder. In Settings, choose an input device and confirm the live meter responds, choose a model, and download it while online. Hold the configured shortcut to record and release it to transcribe. `pactl`, `pw-record`, `xdotool`, Python with PySide6, and a Whisper/Xlib Python environment are checked by the installer.
 
 ## Models and languages
 

@@ -16,7 +16,7 @@ if [[ "${XDG_SESSION_TYPE:-}" == wayland ]]; then
 fi
 
 missing=()
-for command in systemctl pactl pw-record xclip xdotool python3; do
+for command in systemctl pactl pw-record xdotool python3; do
     command -v "$command" >/dev/null 2>&1 || missing+=("$command")
 done
 if ((${#missing[@]})); then

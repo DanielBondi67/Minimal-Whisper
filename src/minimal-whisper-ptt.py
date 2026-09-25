@@ -203,11 +203,10 @@ class Dictation:
                 log('transcription completed with no text')
                 set_state('listening')
                 return
-            subprocess.run(['xclip', '-selection', 'clipboard'], input=text, text=True, check=True)
-            time.sleep(0.15)
-            subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+v'], check=True)
-            log(f'transcription pasted ({len(text)} characters)')
-            notify('Done', 'Transcription pasted')
+            subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', text],
+                           check=True)
+            log(f'transcription typed ({len(text)} characters)')
+            notify('Done', 'Transcription inserted')
             set_state('listening')
 
         except Exception as exc:
