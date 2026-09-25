@@ -1133,7 +1133,7 @@ class MainWindow(QMainWindow):
             round(n * self.scale_factor) for n in (24, 20, 24, 18)))
         self.root_layout.setSpacing(round(14 * self.scale_factor))
         self.column_layout.setContentsMargins(*(
-            round(n * self.scale_factor) for n in (28, 24, 28, 24)))
+            round(n * self.scale_factor) for n in (40, 36, 40, 36)))
         self.column_layout.setSpacing(round(28 * self.scale_factor))
         for form in self.column_forms:
             form.setVerticalSpacing(round(10 * self.scale_factor))
