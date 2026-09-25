@@ -565,9 +565,11 @@ class MainWindow(QMainWindow):
         columns = QHBoxLayout(card)
         self.column_layout = columns
         self.column_forms = []
+        self.column_widgets = []
 
         def make_column(title_text):
-            column = QWidget()
+            column = QFrame()
+            column.setObjectName('settingsColumn')
             column_layout = QVBoxLayout(column)
             column_layout.setContentsMargins(0, 0, 0, 0)
             title = QLabel(title_text)
@@ -579,6 +581,7 @@ class MainWindow(QMainWindow):
             column_layout.addLayout(form)
             columns.addWidget(column, 1, Qt.AlignmentFlag.AlignTop)
             self.column_forms.append(form)
+            self.column_widgets.append(column)
             return form
 
         input_form = make_column('INPUT & APPEARANCE')
@@ -1135,6 +1138,9 @@ class MainWindow(QMainWindow):
         self.column_layout.setContentsMargins(*(
             round(n * self.scale_factor) for n in (40, 36, 40, 36)))
         self.column_layout.setSpacing(round(28 * self.scale_factor))
+        for column in self.column_widgets:
+            column.layout().setContentsMargins(*(
+                round(18 * self.scale_factor) for _ in range(4)))
         for form in self.column_forms:
             form.setVerticalSpacing(round(10 * self.scale_factor))
             form.setHorizontalSpacing(round(12 * self.scale_factor))
@@ -1194,6 +1200,7 @@ class MainWindow(QMainWindow):
             QLabel#muted {{ color: {c['muted']}; }}
             QLabel#badge {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(12)}px; padding: {px(7)}px {px(10)}px; color: {c['text']}; font-size: {px(11)}px; }}
             QFrame#card {{ background: {c['panel']}; border: 1px solid {c['line']}; border-radius: {px(14)}px; }}
+            QFrame#settingsColumn {{ background: {c['window']}; border: 1px solid {c['line']}; border-radius: {px(12)}px; }}
             QComboBox {{ background: {c['raised']}; border: 1px solid {c['line']}; border-radius: {px(8)}px; padding: {px(8)}px {px(10)}px; min-width: {px(160)}px; }}
             QComboBox::drop-down {{ width: 0px; border: none; }}
             QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; }}
