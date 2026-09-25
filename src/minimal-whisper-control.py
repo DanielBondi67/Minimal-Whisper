@@ -390,9 +390,16 @@ class Overlay(QWidget):
             f'letter-spacing: {round(self.scale)}px;')
         self.wave = Waveform(QColor(THEMES[theme]['accent']), self.scale)
         self.wave.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.cancel_button = QPushButton('×')
+        self.cancel_button.setObjectName('cancelRecording')
+        self.cancel_button.setAccessibleName('Cancel recording or transcription')
+        self.cancel_button.setToolTip('Cancel recording or transcription')
+        self.cancel_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.cancel_button.setFixedSize(round(22 * self.scale), round(22 * self.scale))
         self.layout.addWidget(self.dot)
         self.layout.addWidget(self.label)
         self.layout.addWidget(self.wave, 1)
+        self.layout.addWidget(self.cancel_button)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.wave.advance)
         self.timer.start(40)
@@ -410,6 +417,11 @@ class Overlay(QWidget):
             f'color: {foreground}; font-size: {round(9 * self.scale)}px; '
             f'font-weight: 700; letter-spacing: {round(self.scale)}px;')
         self.wave.color = QColor(colors['accent'])
+        self.cancel_button.setStyleSheet(
+            f'QPushButton {{ background: transparent; color: {foreground}; border: none; '
+            f'border-radius: {round(11 * self.scale)}px; padding: 0; '
+            f'font-size: {round(18 * self.scale)}px; font-weight: 400; }} '
+            f'QPushButton:hover {{ background: {colors["raised"]}; }}')
         self.update()
 
     def apply_scale(self, scale_percent):
@@ -420,6 +432,7 @@ class Overlay(QWidget):
         self.layout.setSpacing(round(8 * self.scale))
         self.wave.scale = self.scale
         self.wave.setMinimumSize(round(76 * self.scale), round(24 * self.scale))
+        self.cancel_button.setFixedSize(round(22 * self.scale), round(22 * self.scale))
         self.apply_theme(self.theme)
         if self.position_initialized and self.positioning_supported:
             clamped = self.clamp_position(position)
@@ -1317,6 +1330,7 @@ class Controller:
         self.overlay = Overlay(self.settings['theme'], self.settings.get('overlay_position'),
                                self.overlay_position_changed,
                                self.settings.get('scale_percent', 100))
+        self.overlay.cancel_button.clicked.connect(self.cancel_active_operation)
         for screen in app.screens():
             screen.geometryChanged.connect(self.overlay.keep_on_screen)
             screen.availableGeometryChanged.connect(self.overlay.keep_on_screen)
@@ -1381,6 +1395,20 @@ class Controller:
 
     def reset_overlay_position(self):
         self.overlay.reset_position()
+
+    def cancel_active_operation(self):
+        try:
+            pid = int(PTT_PID.read_text(encoding='ascii').strip())
+            command = Path('/proc', str(pid), 'cmdline').read_bytes()
+            if b'minimal-whisper-ptt.py' not in command:
+                raise RuntimeError('The listener process could not be verified.')
+            os.kill(pid, signal.SIGUSR1)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.window.message.setText(f'Could not cancel the current task: {exc}')
+            return
+        self.window.message.setText('Cancelled; Whisper is ready for the next recording.')
+        self.overlay.wave.set_live_levels(None)
+        self.overlay.hide()
 
     def refresh_waveform(self):
         if not self.overlay.isVisible():

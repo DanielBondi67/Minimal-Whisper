@@ -167,11 +167,14 @@ class Dictation:
         self.temp = None
         self.wav = None
         self.recorder = None
+        self.transcriber = None
         self.pressed = False
         self.waveform_stop = threading.Event()
         self.waveform_thread = None
+        self.cancel_requested = threading.Event()
 
     def start(self):
+        self.cancel_requested.clear()
         self.temp = tempfile.TemporaryDirectory(prefix='minimal-whisper-')
         self.wav = Path(self.temp.name) / 'recording.wav'
         logfile = LOG.open('a', encoding='utf-8')
@@ -254,6 +257,11 @@ class Dictation:
             set_state('error', message)
             temp.cleanup()
             return
+        if self.cancel_requested.is_set():
+            log('transcription cancelled before inference started')
+            set_state('listening')
+            temp.cleanup()
+            return
 
         command = [sys.executable, '-m', 'whisper', str(wav), '--model', transcription_model,
                    '--model_dir', str(CACHE),
@@ -263,16 +271,28 @@ class Dictation:
             command.extend(['--language', LANGUAGE])
         try:
             with LOG.open('a', encoding='utf-8') as f:
-                result = subprocess.run(command, stdin=subprocess.DEVNULL,
-                                        stdout=f, stderr=f, check=False)
+                self.transcriber = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL, stdout=f, stderr=f)
+                if self.cancel_requested.is_set() and self.transcriber.poll() is None:
+                    self.transcriber.terminate()
+                return_code = self.transcriber.wait()
+                self.transcriber = None
+            if self.cancel_requested.is_set():
+                log('transcription cancelled')
+                set_state('listening')
+                return
             output = wav.with_suffix('.txt')
             text = normalize_transcription(
                 output.read_text(encoding='utf-8') if output.exists() else '')
-            if result.returncode != 0:
-                raise RuntimeError(f'Whisper exited with status {result.returncode}; see {LOG}')
+            if return_code != 0:
+                raise RuntimeError(f'Whisper exited with status {return_code}; see {LOG}')
             if not text:
                 notify('No speech detected', 'Try again, speaking clearly into the default microphone.')
                 log('transcription completed with no text')
+                set_state('listening')
+                return
+            if self.cancel_requested.is_set():
+                log('transcription cancelled before text insertion')
                 set_state('listening')
                 return
             output_method = insert_transcription(text)
@@ -340,10 +360,50 @@ class Dictation:
         if self.waveform_thread is not None:
             self.waveform_thread.join(timeout=1)
             self.waveform_thread = None
+        transcriber = self.transcriber
+        if transcriber is not None and transcriber.poll() is None:
+            transcriber.terminate()
+            try:
+                transcriber.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                transcriber.kill()
+                transcriber.wait(timeout=2)
+        self.transcriber = None
         if temp is not None:
             temp.cleanup()
         set_state('stopped')
         log('recording cancelled during shutdown')
+
+    def cancel_current(self):
+        self.cancel_requested.set()
+        self.waveform_stop.set()
+        proc, temp = self.recorder, self.temp
+        if proc is not None:
+            self.recorder = self.wav = self.temp = None
+            self.pressed = False
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+            if self.waveform_thread is not None:
+                self.waveform_thread.join(timeout=1)
+                self.waveform_thread = None
+            if temp is not None:
+                temp.cleanup()
+
+        transcriber = self.transcriber
+        if transcriber is not None and transcriber.poll() is None:
+            transcriber.terminate()
+            try:
+                transcriber.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                transcriber.kill()
+                transcriber.wait(timeout=2)
+        set_state('listening')
+        log('current recording or transcription cancelled')
 
 
 def main():
@@ -376,7 +436,11 @@ def main():
         dictation.cancel()
         raise SystemExit(0)
 
+    def handle_cancel(_signum, _frame):
+        dictation.cancel_current()
+
     signal.signal(signal.SIGTERM, handle_term)
+    signal.signal(signal.SIGUSR1, handle_cancel)
     try:
         while True:
             event = dpy.next_event()
@@ -454,7 +518,11 @@ def main_wayland():
         dictation.cancel()
         app.quit()
 
+    def handle_cancel(_signum, _frame):
+        dictation.cancel_current()
+
     signal.signal(signal.SIGTERM, handle_term)
+    signal.signal(signal.SIGUSR1, handle_cancel)
     try:
         return app.exec()
     finally:
