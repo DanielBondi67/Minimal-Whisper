@@ -66,6 +66,8 @@ class DictationCancellationTests(unittest.TestCase):
             patch.object(listener, 'STATE', self.root / 'status.json'),
             patch.object(listener.AudioBackend, 'detect'),
             patch.object(listener, 'insert_transcription', return_value='test delivery'),
+            patch.object(listener, 'CONFIG', self.root / 'settings.json'),
+            patch.object(listener, 'LEGACY_CONFIG', self.root / 'legacy-settings.json'),
         ]
         self.mocks = [p.start() for p in self.patches]
         self.addCleanup(self.temp.cleanup)
@@ -93,6 +95,36 @@ class DictationCancellationTests(unittest.TestCase):
         marker = self.root / f'{op.id}.started'
         wait_until(marker.exists)
         return json.loads(marker.read_text())
+
+    def test_new_recording_uses_changed_microphone_without_restarting_listener(self):
+        listener.CONFIG.write_text(json.dumps({'audio_source': 'bluez_input.headset'}))
+        self.record()
+        command = self.mocks[2].return_value.recording_command
+        self.assertEqual(command.call_args.args[0], 'bluez_input.headset')
+        self.dictation.cancel_current()
+        listener.CONFIG.write_text(json.dumps({'audio_source': 'alsa_input.builtin'}))
+        self.record()
+        self.assertEqual(command.call_args.args[0], 'alsa_input.builtin')
+        self.dictation.cancel_current()
+        listener.CONFIG.write_text(json.dumps({'audio_source': ''}))
+        self.record()
+        self.assertEqual(command.call_args.args[0], '')
+
+    def test_disconnected_microphone_failure_does_not_block_replacement(self):
+        listener.CONFIG.write_text(json.dumps({'audio_source': 'bluez_input.headset'}))
+        command = self.mocks[2].return_value.recording_command
+        recorder = command.side_effect
+        command.side_effect = lambda source, *args: (
+            [sys.executable, '-c', 'raise SystemExit(1)']
+            if source == 'bluez_input.headset' else recorder(source, *args))
+        self.dictation.start()
+        wait_until(lambda: not self.dictation._completed.empty())
+        self.dictation.poll()
+        self.assertIsNone(self.dictation.active)
+        listener.CONFIG.write_text(json.dumps({'audio_source': 'alsa_input.builtin'}))
+        self.record()
+        self.assertEqual(command.call_args.args[0], 'alsa_input.builtin')
+        self.delivery.assert_not_called()
 
     def test_cancel_recording_discards_files_and_allows_immediate_restart(self):
         old = self.record()

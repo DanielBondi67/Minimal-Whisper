@@ -1110,9 +1110,8 @@ class MainWindow(QMainWindow):
             self.audio_level_text.setText('Microphone stays idle until monitoring or recording starts.')
 
     def audio_source_changed(self, _index):
-        source = self.audio_source.currentData() or ''
-        self.settings['audio_source'] = source
-        self.app.settings['audio_source'] = source
+        # Keep the saved snapshot intact until save_settings compares it with
+        # the selection. Mutating it here hides the change from the listener.
         self.schedule_save()
         if self.audio_meter_toggle.isChecked():
             self.start_audio_meter()
@@ -1303,7 +1302,9 @@ class MainWindow(QMainWindow):
     def save_settings(self):
         updated = self.collect_settings()
         self._save_timer.stop()
-        previous = self.settings
+        # The controller may share this dict with the window. Updating its
+        # settings below must not also overwrite our change-detection baseline.
+        previous = self.settings.copy()
         try:
             write_settings(updated)
         except OSError as exc:

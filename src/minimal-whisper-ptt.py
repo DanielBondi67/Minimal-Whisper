@@ -210,8 +210,11 @@ class Dictation:
             self.active = operation
         try:
             LOG.parent.mkdir(parents=True, exist_ok=True)
+            # Capture devices can change while the listener stays running (for
+            # example after Bluetooth disconnects). Bind each new recording to
+            # the latest saved selection, not the startup settings snapshot.
             command = AudioBackend.detect().recording_command(
-                SETTINGS.get('audio_source'), operation.wav, 16000, 1)
+                load_settings().get('audio_source'), operation.wav, 16000, 1)
             with LOG.open('a', encoding='utf-8') as logfile:
                 operation.recorder = operation.spawn(
                     command, stdin=subprocess.DEVNULL,
