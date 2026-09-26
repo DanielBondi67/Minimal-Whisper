@@ -1397,10 +1397,10 @@ class Controller:
         if self.tray:
             self.tray.show()
         self.last_state = None
-        # The status file can still say "transcribing" briefly after SIGUSR1
-        # is sent. Keep an explicitly cancelled overlay dismissed until the
-        # listener acknowledges cancellation by leaving an active state.
-        self.overlay_dismissed_for_active_state = False
+        self.dismissed_operation_id = None
+        self.overlay_operation_id = None
+        self.cancel_waiting = False
+        self.listener_running = False
         self.timer = QTimer(app)
         self.timer.timeout.connect(self.refresh_status)
         self.timer.start(1000)
@@ -1451,22 +1451,37 @@ class Controller:
         except (OSError, ValueError, RuntimeError) as exc:
             self.window.message.setText(f'Could not cancel the current task: {exc}')
             return
-        self.overlay_dismissed_for_active_state = True
-        self.window.message.setText('Cancelled; Whisper is ready for the next recording.')
+        self.dismissed_operation_id = self.overlay_operation_id
+        self.cancel_waiting = True
+        self.window.message.setText('Cancelling…')
         self.overlay.wave.set_live_levels(None)
         self.overlay.hide()
 
     def refresh_waveform(self):
-        if not self.overlay.isVisible():
-            return
-        current = read_json(STATE, {'state': 'stopped'})
-        state = current.get('state')
-        if state not in ('recording', 'transcribing'):
-            self.overlay.wave.set_live_levels(None)
-            self.overlay.hide()
-        else:
+        self.refresh_overlay(read_json(STATE, {'state': 'stopped'}))
+
+    def refresh_overlay(self, current):
+        state = current.get('state', 'stopped')
+        operation_id = current.get('operation_id')
+        visible = (self.listener_running and state in ('recording', 'transcribing')
+                   and (self.dismissed_operation_id is None
+                        or operation_id != self.dismissed_operation_id))
+        if self.cancel_waiting and (operation_id != self.dismissed_operation_id
+                                    or state not in ('recording', 'transcribing', 'delivering')):
+            self.cancel_waiting = False
+            self.window.message.setText('Cancelled; ready for the next recording.')
+        if visible:
+            self.overlay_operation_id = operation_id
+            label = 'TRANSCRIBING' if state == 'transcribing' else 'LISTENING'
+            if self.overlay.label.text() != label:
+                self.overlay.label.setText(label)
             self.overlay.wave.set_live_levels(
                 current.get('waveform') if state == 'recording' else None)
+            if not self.overlay.isVisible():
+                self.overlay.show_bottom_center()
+        else:
+            self.overlay.wave.set_live_levels(None)
+            self.overlay.hide()
 
     def refresh_theme(self):
         if self.tray:
@@ -1484,19 +1499,8 @@ class Controller:
             state = 'stopped'
         elif running and state == 'stopped':
             state = 'listening'
-        visible_state = state in ('recording', 'transcribing')
-        if not visible_state:
-            self.overlay_dismissed_for_active_state = False
-        if visible_state and not self.overlay_dismissed_for_active_state:
-            new_text = 'TRANSCRIBING' if state == 'transcribing' else 'LISTENING'
-            if self.overlay.label.text() != new_text:
-                self.overlay.label.setText(new_text)
-            if not self.overlay.isVisible():
-                self.overlay.show_bottom_center()
-        elif self.overlay.isVisible():
-            self.overlay.hide()
-        if not visible_state and self.overlay.label.text() != 'LISTENING':
-            self.overlay.label.setText('LISTENING')
+        self.listener_running = running
+        self.refresh_overlay({**current, 'state': state})
 
         label = {'recording': 'Recording', 'transcribing': 'Transcribing',
                  'delivering': 'Delivering',
