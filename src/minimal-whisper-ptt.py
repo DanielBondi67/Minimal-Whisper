@@ -71,6 +71,8 @@ print(json.dumps({name: {'file': os.path.basename(urllib.parse.urlsplit(url).pat
                   for name, url in whisper._MODELS.items()}))
 '''
 KEYBOARD_PORTAL = None
+_STATE_LOCK = threading.RLock()
+_STATE_REVISION = 0
 
 
 def load_model_metadata():
@@ -90,17 +92,28 @@ def log(message):
 
 
 def set_state(state, detail='', waveform=None):
+    global _STATE_REVISION
     STATE.parent.mkdir(parents=True, exist_ok=True)
     payload = {'state': state, 'detail': detail, 'model': MODEL,
                'language': LANGUAGE, 'updated': time.time()}
     if waveform is not None:
         payload['waveform'] = waveform
-    tmp = STATE.with_suffix('.tmp')
-    try:
-        tmp.write_text(json.dumps(payload), encoding='utf-8')
-        tmp.replace(STATE)
-    except OSError as exc:
-        log(f'could not update UI status: {exc!r}')
+    with _STATE_LOCK:
+        _STATE_REVISION += 1
+        revision = _STATE_REVISION
+        tmp = STATE.with_name(
+            f'.{STATE.name}.{os.getpid()}.{threading.get_ident()}.{revision}.tmp')
+        try:
+            tmp.write_text(json.dumps(payload), encoding='utf-8')
+            # Signal handlers can re-enter on this thread. An older state write
+            # must not overwrite a newer cancellation/reset state.
+            if revision == _STATE_REVISION:
+                tmp.replace(STATE)
+            else:
+                tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            log(f'could not update UI status: {exc!r}')
 
 
 def notify(title, body):
@@ -133,13 +146,14 @@ def insert_transcription(text, dictation, cancel_event, operation_id):
             return None
         copied = dictation.operation_epoch.run_if_current(
             operation_id, cancel_event,
-            lambda: QGuiApplication.clipboard().setText(text))
+            lambda: dictation.copy_to_clipboard(
+                QGuiApplication, text, operation_id, cancel_event))
         if not copied:
             return None
         detail = 'Copied transcription to clipboard; paste it yourself.'
         if portal_error:
             detail += f' Keyboard portal: {portal_error}'
-        set_state('listening', detail)
+        dictation.set_state_if_current(operation_id, cancel_event, 'listening', detail)
         log(detail)
         return 'copied to clipboard for manual paste'
     process_holder = []
@@ -150,6 +164,8 @@ def insert_transcription(text, dictation, cancel_event, operation_id):
             stdin=subprocess.DEVNULL, start_new_session=True)
         dictation.typing_process = process
         process_holder.append(process)
+        if not dictation.operation_is_current(operation_id, cancel_event):
+            dictation.kill_process_tree(process)
 
     if not dictation.operation_epoch.run_if_current(
             operation_id, cancel_event, start_typing):
@@ -206,18 +222,16 @@ class Dictation:
         self.recorder = None
         self.transcriber = None
         self.typing_process = None
+        self.clipboard_text = None
         self.pressed = False
         self.operation_epoch = OperationEpoch()
         self.waveform_stop = threading.Event()
         self.waveform_thread = None
         self.cancel_requested = threading.Event()
-        self.cancel_cleanup_ready = threading.Event()
-        self.cancel_cleanup_ready.set()
 
     def start(self):
-        if not self.cancel_cleanup_ready.wait(timeout=5):
-            raise RuntimeError('The cancelled recording is still closing; try again shortly.')
         operation_id, cancel_event = self.operation_epoch.begin()
+        self.clipboard_text = None
         waveform_stop = threading.Event()
         self.cancel_requested = cancel_event
         self.waveform_stop = waveform_stop
@@ -243,33 +257,45 @@ class Dictation:
         wav = self.wav
         time.sleep(0.15)
         if not self.operation_is_current(operation_id, cancel_event):
-            if not self.cancel_cleanup_ready.wait(timeout=5):
-                self.terminate_process_tree(recorder)
-                if temp is not None:
-                    temp.cleanup()
+            self.kill_process_tree(recorder)
+            if temp is not None:
+                temp.cleanup()
             self.recorder = self.wav = self.temp = None
             return
         if recorder.poll() is not None:
             self.temp.cleanup()
             self.recorder = self.wav = self.temp = None
             raise RuntimeError(f'{AudioBackend.detect().name} recorder exited before capture started; see {LOG}')
-        if not self.set_state_if_current(
-                operation_id, cancel_event, 'recording', waveform=[0.0] * 17):
-            self.terminate_process_tree(recorder)
+        thread = threading.Thread(
+            target=self.monitor_waveform,
+            args=(wav, waveform_stop, operation_id, cancel_event), daemon=True)
+
+        def activate_recording():
+            self.pressed = True
+            self.waveform_thread = thread
+            set_state('recording', waveform=[0.0] * 17)
+            thread.start()
+
+        if not self.operation_epoch.run_if_current(
+                operation_id, cancel_event, activate_recording):
+            self.kill_process_tree(recorder)
             if temp is not None:
                 temp.cleanup()
             self.recorder = self.wav = self.temp = None
             return
-        self.pressed = True
-        self.waveform_thread = threading.Thread(
-            target=self.monitor_waveform,
-            args=(wav, waveform_stop, operation_id, cancel_event), daemon=True)
-        self.waveform_thread.start()
         log(f'recording started model={MODEL}')
         notify('Recording', 'Release the shortcut to transcribe')
 
     def operation_is_current(self, operation_id, cancel_event):
         return self.operation_epoch.is_current(operation_id, cancel_event)
+
+    def copy_to_clipboard(self, application, text, operation_id, cancel_event):
+        application.clipboard().setText(text)
+        self.clipboard_text = text
+        if not self.operation_is_current(operation_id, cancel_event):
+            if application.clipboard().text() == text:
+                application.clipboard().clear()
+            self.clipboard_text = None
 
     def set_state_if_current(self, operation_id, cancel_event, state, detail=None,
                              waveform=None):
@@ -445,6 +471,17 @@ class Dictation:
                 pass
             process.wait(timeout=timeout)
 
+    @staticmethod
+    def kill_process_tree(process):
+        if process is None:
+            return
+        try:
+            # The direct child may have exited while descendants still hold
+            # the operation's process group open.
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
     def verify_model_is_downloaded(self):
         local_model = Path(MODEL)
         if local_model.is_absolute():
@@ -516,63 +553,30 @@ class Dictation:
     def cancel_current(self):
         self.operation_epoch.cancel(self.cancel_requested)
         self.waveform_stop.set()
-        set_state('cancelling')
         proc, temp = self.recorder, self.temp
-        waveform_thread = self.waveform_thread
-        if proc is not None:
-            self.recorder = self.wav = self.temp = None
-            self.pressed = False
-            self.waveform_thread = None
-            self.cancel_cleanup_ready.clear()
-            try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except OSError:
-                pass
-            threading.Thread(
-                target=self.finish_cancelled_recording,
-                args=(proc, temp, waveform_thread), daemon=True).start()
-        else:
-            self.pressed = False
-            self.waveform_thread = None
-            if waveform_thread is not None:
-                waveform_thread.join(timeout=0.2)
-            if temp is not None:
-                temp.cleanup()
-
+        self.recorder = self.wav = self.temp = None
+        self.pressed = False
+        self.waveform_thread = None
+        self.kill_process_tree(proc)
         transcriber = self.transcriber
-        if transcriber is not None and transcriber.poll() is None:
-            try:
-                os.killpg(transcriber.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            threading.Thread(
-                target=self.terminate_process_tree, args=(transcriber,), daemon=True).start()
+        self.kill_process_tree(transcriber)
+        self.transcriber = None
         typing_process = self.typing_process
-        if typing_process is not None and typing_process.poll() is None:
+        self.kill_process_tree(typing_process)
+        self.typing_process = None
+        if temp is not None:
+            temp.cleanup()
+        if self.clipboard_text is not None:
             try:
-                os.killpg(typing_process.pid, signal.SIGTERM)
-            except OSError:
-                pass
-        self.wav = self.temp = None
+                from PySide6.QtGui import QGuiApplication
+                clipboard = QGuiApplication.clipboard()
+                if clipboard.text() == self.clipboard_text:
+                    clipboard.clear()
+            except Exception as exc:
+                log(f'could not clear cancelled transcription from clipboard: {exc!r}')
+            self.clipboard_text = None
         set_state('listening', 'Cancelled; recording discarded.')
         log('current recording or transcription cancelled')
-
-    def finish_cancelled_recording(self, proc, temp, waveform_thread):
-        try:
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                proc.wait(timeout=2)
-            if waveform_thread is not None:
-                waveform_thread.join(timeout=1)
-            if temp is not None:
-                temp.cleanup()
-        finally:
-            self.cancel_cleanup_ready.set()
 
 
 def main():

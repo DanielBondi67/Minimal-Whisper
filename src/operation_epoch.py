@@ -28,4 +28,4 @@ class OperationEpoch:
             if self.current_id != operation_id or cancelled.is_set():
                 return False
             action()
-            return True
+            return self.current_id == operation_id and not cancelled.is_set()

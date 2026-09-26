@@ -17,6 +17,29 @@ class OperationEpochTests(unittest.TestCase):
         self.assertTrue(epoch.is_current(new_id, new_cancelled))
         self.assertFalse(new_cancelled.is_set())
 
+    def test_cancelled_operation_cannot_run_late_side_effects(self):
+        epoch = OperationEpoch()
+        operation_id, cancelled = epoch.begin()
+        epoch.cancel(cancelled)
+        epoch.begin()
+
+        effects = []
+        ran = epoch.run_if_current(
+            operation_id, cancelled, lambda: effects.append('stale transcription'))
+
+        self.assertFalse(ran)
+        self.assertEqual(effects, [])
+
+    def test_cancel_during_side_effect_invalidates_operation_on_return(self):
+        epoch = OperationEpoch()
+        operation_id, cancelled = epoch.begin()
+
+        ran = epoch.run_if_current(
+            operation_id, cancelled, lambda: epoch.cancel(cancelled))
+
+        self.assertFalse(ran)
+        self.assertFalse(epoch.is_current(operation_id, cancelled))
+
 
 if __name__ == '__main__':
     unittest.main()
