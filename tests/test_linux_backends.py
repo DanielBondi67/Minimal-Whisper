@@ -79,7 +79,25 @@ class ShortcutCancelTests(unittest.TestCase):
         self.assertFalse(gate.may_start())
         self.assertFalse(gate.release())
         self.assertTrue(gate.may_start())
+        self.assertTrue(gate.press())
         self.assertTrue(gate.release())
+
+    def test_auto_repeat_cannot_start_more_recordings(self):
+        gate = ShortcutReleaseGate()
+        self.assertTrue(gate.press())
+        for _ in range(50):
+            self.assertFalse(gate.release(physically_down=True))
+            self.assertFalse(gate.press())
+        self.assertTrue(gate.release())
+        self.assertTrue(gate.press())
+
+    def test_cancel_then_real_release_allows_immediate_new_press(self):
+        gate = ShortcutReleaseGate()
+        self.assertTrue(gate.press())
+        gate.cancel_held_shortcut(gate.held)
+        self.assertFalse(gate.press())
+        self.assertFalse(gate.release())
+        self.assertTrue(gate.press())
 
 
 class TextOutputTests(unittest.TestCase):
