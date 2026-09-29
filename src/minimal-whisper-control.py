@@ -556,6 +556,7 @@ class MainWindow(QMainWindow):
     def __init__(self, app):
         super().__init__()
         self.app = app
+        self.pending_restart = None
         self.settings = read_json(SETTINGS, DEFAULTS)
         self.settings['scale_percent'] = normalized_scale(
             self.settings.get('scale_percent', 100))
@@ -1335,11 +1336,13 @@ class MainWindow(QMainWindow):
         elif was_running:
             self.resume_listener_after_model_change = False
             self.message.setText('Applying in background…')
+            requested_at = time.time()
             result = service_action('restart', background=True)
             if isinstance(result, Exception) or result.returncode:
                 detail = str(result) if isinstance(result, Exception) else result.stderr.strip()
                 self.message.setText(f'Saved, but could not apply: {detail or "unknown error"}')
             else:
+                self.pending_restart = (requested_at, updated['model'], updated['language'])
                 self.message.setText('Saved; Whisper is restarting in the background.')
         else:
             if not self.resume_listener_for_selected_model():
@@ -1347,6 +1350,27 @@ class MainWindow(QMainWindow):
         self.app.refresh_theme()
         self.app.refresh_status()
         self.update_service_controls(service_running())
+
+    def refresh_restart_status(self, current, running):
+        if self.pending_restart is None:
+            return
+        if self.message.text() != 'Saved; Whisper is restarting in the background.':
+            # A newer edit, error, or action owns the status message now.
+            self.pending_restart = None
+            return
+        requested_at, model, language = self.pending_restart
+        if current.get('updated', 0) < requested_at:
+            return
+        if current.get('state') == 'error':
+            self.message.setText('Saved, but Whisper needs attention: '
+                                 + current.get('detail', 'restart failed'))
+            self.pending_restart = None
+        elif (running and current.get('state') in
+              {'listening', 'recording', 'transcribing', 'delivering'}
+              and current.get('model') == model
+              and current.get('language') == language):
+            self.message.setText('Saved')
+            self.pending_restart = None
 
     def toggle_service(self):
         if self.selected_model_is_downloading():
@@ -1496,6 +1520,7 @@ class Controller:
         current = read_json(STATE, {'state': 'stopped'})
         state = current.get('state', 'stopped')
         running = service_running()
+        self.window.refresh_restart_status(current, running)
         if not running and state not in ('stopped',):
             state = 'stopped'
         elif running and state == 'stopped':

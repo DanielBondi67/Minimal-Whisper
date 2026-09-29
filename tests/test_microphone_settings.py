@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel
 
 spec = importlib.util.spec_from_file_location(
     'microphone_control', Path(__file__).resolve().parents[1] / 'src/minimal-whisper-control.py')
@@ -42,7 +42,7 @@ class MicrophoneSettingsTests(unittest.TestCase):
                 settings=saved, refresh_theme=Mock(), refresh_status=Mock()),
             audio_source=self.selector, schedule_save=Mock(),
             audio_meter_toggle=Mock(), start_audio_meter=Mock(),
-            _save_timer=Mock(), message=Mock(),
+            _save_timer=Mock(), message=QLabel(), pending_restart=None,
             selected_model_is_downloading=Mock(return_value=False),
             whisper_model_info={}, resume_listener_for_selected_model=Mock(return_value=False),
             update_service_controls=Mock())
@@ -80,6 +80,48 @@ class MicrophoneSettingsTests(unittest.TestCase):
             self.save(running=True).assert_not_called()
         self.assertEqual(self.window.settings['audio_source'], 'bluez_input.headset')
         self.save(running=True).assert_called_once_with('restart', background=True)
+
+    def test_restart_message_waits_for_fresh_matching_listener_status(self):
+        self.window.collect_settings = lambda: {**self.window.settings, 'model': 'small'}
+        self.save(running=True)
+        requested_at, model, language = self.window.pending_restart
+        restarting = self.window.message.text()
+        current = {'updated': requested_at - 1, 'model': model,
+                   'language': language, 'state': 'listening'}
+        refresh = lambda: control.MainWindow.refresh_restart_status(self.window, current, True)
+        refresh()
+        self.assertEqual(self.window.message.text(), restarting)
+        current.update(updated=requested_at + 1, state='stopped')
+        refresh()
+        self.assertEqual(self.window.message.text(), restarting)
+        current.update(state='listening', model='base')
+        refresh()
+        self.assertEqual(self.window.message.text(), restarting)
+        current['model'] = model
+        refresh()
+        self.assertEqual(self.window.message.text(), 'Saved')
+        self.assertIsNone(self.window.pending_restart)
+
+    def test_restart_completion_does_not_overwrite_a_newer_message(self):
+        self.selector.setCurrentIndex(1)
+        self.save(running=True)
+        requested_at, model, language = self.window.pending_restart
+        self.window.message.setText('Enter a complete shortcut to save.')
+        control.MainWindow.refresh_restart_status(self.window, {
+            'updated': requested_at + 1, 'model': model, 'language': language,
+            'state': 'listening'}, True)
+        self.assertEqual(self.window.message.text(), 'Enter a complete shortcut to save.')
+        self.assertIsNone(self.window.pending_restart)
+
+    def test_restart_error_is_shown_instead_of_saved(self):
+        self.selector.setCurrentIndex(1)
+        self.save(running=True)
+        requested_at, model, language = self.window.pending_restart
+        control.MainWindow.refresh_restart_status(self.window, {
+            'updated': requested_at + 1, 'model': model, 'language': language,
+            'state': 'error', 'detail': 'Shortcut unavailable'}, False)
+        self.assertIn('Shortcut unavailable', self.window.message.text())
+        self.assertIsNone(self.window.pending_restart)
 
 
 if __name__ == '__main__':
